@@ -1,0 +1,54 @@
+{
+  "timestamp": "2025-11-07T21:50:16.003Z",
+  "config": {
+    "apiKey": "Set",
+    "fromEmail": "info@coinley.io"
+  },
+  "tests": [
+    {
+      "name": "Verification Email",
+      "description": "Tests email verification with token link",
+      "status": "passed",
+      "timestamp": "2025-11-07T21:50:16.006Z",
+      "error": null,
+      "responseTime": 1879
+    },
+    {
+      "name": "Welcome Email",
+      "description": "Tests welcome email for new users",
+      "status": "passed",
+      "timestamp": "2025-11-07T21:50:22.318Z",
+      "error": null,
+      "responseTime": 240
+    },
+    {
+      "name": "Password Reset Email",
+      "description": "Tests password reset email with reset link",
+      "status": "passed",
+      "timestamp": "2025-11-07T21:50:24.559Z",
+      "error": null,
+      "responseTime": 202
+    },
+    {
+      "name": "Team Invite Email",
+      "description": "Tests team invitation email",
+      "status": "passed",
+      "timestamp": "2025-11-07T21:50:26.763Z",
+      "error": null,
+      "responseTime": 1
+    },
+    {
+      "name": "Payment Success Email",
+      "description": "Tests payment confirmation email",
+      "status": "passed",
+      "timestamp": "2025-11-07T21:50:28.766Z",
+      "error": null,
+      "responseTime": 1
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0
+  }
+}

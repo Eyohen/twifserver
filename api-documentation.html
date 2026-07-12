@@ -1,0 +1,1958 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coinley API Documentation</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        code,
+        pre {
+            font-family: 'Fira Code', monospace;
+        }
+
+        .method-badge {
+            font-weight: 600;
+            font-size: 0.75rem;
+            padding: 0.25rem 0.75rem;
+            border-radius: 0.375rem;
+            display: inline-block;
+        }
+
+        .method-get {
+            background: #10b981;
+            color: white;
+        }
+
+        .method-post {
+            background: #3b82f6;
+            color: white;
+        }
+
+        .method-put {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .method-delete {
+            background: #ef4444;
+            color: white;
+        }
+
+        .endpoint-card {
+            transition: all 0.3s ease;
+        }
+
+        .endpoint-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+        }
+
+        .code-block {
+            background: #1e293b;
+            color: #e2e8f0;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            overflow-x: auto;
+        }
+
+        .nav-link {
+            transition: all 0.2s ease;
+        }
+
+        .nav-link:hover {
+            background: #f3f4f6;
+            border-left: 3px solid #3b82f6;
+        }
+
+        .nav-link.active {
+            background: #eff6ff;
+            border-left: 3px solid #3b82f6;
+            color: #3b82f6;
+            font-weight: 600;
+        }
+
+        .search-highlight {
+            background: yellow;
+            padding: 0.1rem 0.2rem;
+            border-radius: 0.2rem;
+        }
+
+        .badge {
+            font-size: 0.75rem;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-weight: 500;
+        }
+
+        .badge-required {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .badge-optional {
+            background: #e0e7ff;
+            color: #3730a3;
+        }
+
+        .sticky-sidebar {
+            position: sticky;
+            top: 2rem;
+            max-height: calc(100vh - 4rem);
+            overflow-y: auto;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-50">
+    <!-- Header -->
+    <header class="bg-gradient-to-r from-blue-600 to-blue-800 text-white shadow-lg">
+        <div class="container mx-auto px-6 py-6">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-4">
+                    <div class="py-1 px-2 bg-white rounded-lg">
+                        <img src="/Logomark.png" class="w-9 "></img>
+                    </div>
+                    <div>
+                        <h1 class="text-3xl font-bold">Coinley API Documentation</h1>
+                        <p class="text-blue-200 text-sm">Cryptocurrency Payment Gateway API v1.0</p>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <span class="px-4 py-2 bg-blue-500 rounded-lg">
+                        <i class="fas fa-server mr-2"></i>Base URL: <code
+                            class="bg-blue-700 px-2 py-1 rounded">https://api.coinley.io</code>
+                    </span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Search Bar -->
+    <div class="container mx-auto px-6 py-6">
+        <div class="relative">
+            <input type="text" id="searchInput" placeholder="Search endpoints, methods, or descriptions..."
+                class="w-full px-6 py-4 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 shadow-sm">
+            <i class="fas fa-search absolute right-6 top-5 text-gray-400"></i>
+        </div>
+    </div>
+
+    <div class="container mx-auto px-6 pb-12">
+        <div class="grid grid-cols-12 gap-8">
+            <!-- Sidebar Navigation -->
+            <aside class="col-span-12 lg:col-span-3">
+                <div class="sticky-sidebar bg-white rounded-lg shadow-md p-6">
+                    <h3 class="font-bold text-lg mb-4 text-gray-800">Navigation</h3>
+                    <nav class="space-y-1">
+                        <a href="#overview" class="nav-link block px-4 py-2 rounded-lg text-gray-700">
+                            <i class="fas fa-info-circle mr-2"></i>Overview
+                        </a>
+                        <a href="#authentication" class="nav-link block px-4 py-2 rounded-lg text-gray-700">
+                            <i class="fas fa-key mr-2"></i>Authentication
+                        </a>
+                        <a href="#merchant" class="nav-link block px-4 py-2 rounded-lg text-gray-700">
+                            <i class="fas fa-store mr-2"></i>Merchant
+                        </a>
+                        <a href="#payment" class="nav-link block px-4 py-2 rounded-lg text-gray-700">
+                            <i class="fas fa-credit-card mr-2"></i>Payments
+                        </a>
+                        <a href="#team-members" class="nav-link block px-4 py-2 rounded-lg text-gray-700">
+                            <i class="fas fa-users mr-2"></i>Team Members
+                        </a>
+                        <a href="#network" class="nav-link block px-4 py-2 rounded-lg text-gray-700">
+                            <i class="fas fa-network-wired mr-2"></i>Networks
+                        </a>
+                        <a href="#admin" class="nav-link block px-4 py-2 rounded-lg text-gray-700">
+                            <i class="fas fa-user-shield mr-2"></i>Admin
+                        </a>
+                        <a href="#waitlist" class="nav-link block px-4 py-2 rounded-lg text-gray-700">
+                            <i class="fas fa-list mr-2"></i>Waitlist
+                        </a>
+                        <a href="#errors" class="nav-link block px-4 py-2 rounded-lg text-gray-700">
+                            <i class="fas fa-exclamation-triangle mr-2"></i>Error Codes
+                        </a>
+                    </nav>
+                </div>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="col-span-12 lg:col-span-9">
+                <!-- Overview Section -->
+                <section id="overview" class="bg-white rounded-lg shadow-md p-8 mb-8">
+                    <h2 class="text-3xl font-bold mb-4 text-gray-800">
+                        <i class="fas fa-info-circle text-blue-600 mr-3"></i>Overview
+                    </h2>
+                    <div class="prose max-w-none">
+                        <p class="text-gray-700 mb-4">
+                            Welcome to the Coinley API documentation. This cryptocurrency payment gateway allows
+                            merchants to accept
+                            crypto payments across multiple blockchain networks with automated fee distribution via
+                            smart contracts.
+                        </p>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 my-6">
+                            <div class="bg-blue-50 p-4 rounded-lg border-l-4 border-blue-500">
+                                <h4 class="font-semibold text-blue-900 mb-2">
+                                    <i class="fas fa-bolt mr-2"></i>PaymentSplitter
+                                </h4>
+                                <p class="text-sm text-blue-700">Automated fee distribution via smart contracts</p>
+                            </div>
+                            <div class="bg-green-50 p-4 rounded-lg border-l-4 border-green-500">
+                                <h4 class="font-semibold text-green-900 mb-2">
+                                    <i class="fas fa-network-wired mr-2"></i>Multi-Chain
+                                </h4>
+                                <p class="text-sm text-green-700">Support for Ethereum, BSC, Polygon, Solana & more</p>
+                            </div>
+                            <div class="bg-purple-50 p-4 rounded-lg border-l-4 border-purple-500">
+                                <h4 class="font-semibold text-purple-900 mb-2">
+                                    <i class="fas fa-webhook mr-2"></i>Webhooks
+                                </h4>
+                                <p class="text-sm text-purple-700">Real-time payment notifications</p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Authentication Section -->
+                <section id="authentication" class="bg-white rounded-lg shadow-md p-8 mb-8">
+                    <h2 class="text-3xl font-bold mb-4 text-gray-800">
+                        <i class="fas fa-key text-blue-600 mr-3"></i>Authentication
+                    </h2>
+                    <p class="text-gray-700 mb-6">
+                        Coinley API uses two authentication methods depending on the user type:
+                    </p>
+
+                    <div class="space-y-6">
+                        <!-- API Key/Secret Authentication -->
+                        <div class="border-l-4 border-blue-500 bg-blue-50 p-6 rounded-r-lg">
+                            <h3 class="text-xl font-semibold mb-3 text-blue-900">
+                                <i class="fas fa-shield-alt mr-2"></i>Merchant API Authentication
+                            </h3>
+                            <p class="text-gray-700 mb-4">
+                                For merchant endpoints, include your API Key and Secret in request headers:
+                            </p>
+                            <pre class="code-block"><code>{
+  "x-api-key": "your_api_key_here",
+  "x-api-secret": "your_api_secret_here"
+}</code></pre>
+                            <div class="mt-4 bg-yellow-50 border-l-4 border-yellow-400 p-4">
+                                <p class="text-sm text-yellow-800">
+                                    <i class="fas fa-exclamation-triangle mr-2"></i>
+                                    <strong>Important:</strong> Keep your API credentials secure. Never share them
+                                    publicly or commit them to version control.
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- JWT Authentication -->
+                        <div class="border-l-4 border-green-500 bg-green-50 p-6 rounded-r-lg">
+                            <h3 class="text-xl font-semibold mb-3 text-green-900">
+                                <i class="fas fa-user-lock mr-2"></i>JWT Token Authentication
+                            </h3>
+                            <p class="text-gray-700 mb-4">
+                                For admin and team member endpoints, use JWT tokens in the Authorization header:
+                            </p>
+                            <pre class="code-block"><code>{
+  "Authorization": "Bearer your_jwt_token_here"
+}</code></pre>
+                            <p class="text-sm text-gray-600 mt-4">
+                                Tokens are obtained from login endpoints and expire after 24 hours.
+                            </p>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Merchant Endpoints -->
+                <section id="merchant" class="mb-8">
+                    <h2 class="text-3xl font-bold mb-6 text-gray-800 bg-white rounded-lg shadow-md p-6">
+                        <i class="fas fa-store text-blue-600 mr-3"></i>Merchant Endpoints
+                    </h2>
+
+                    <!-- Register Merchant -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/merchants/register</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Register a new merchant account</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "firstName": "John",
+  "lastName": "Doe",
+  "businessName": "Acme Corp",
+  "email": "john@acmecorp.com",
+  "password": "SecurePass123!",
+  "walletAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (201 Created):</h4>
+                        <pre class="code-block mb-4"><code>{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "merchant": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "firstName": "John",
+    "lastName": "Doe",
+    "businessName": "Acme Corp",
+    "email": "john@acmecorp.com",
+    "apiKey": "ck_live_8a7sd6f8a7sdf6a8s7df",
+    "apiSecret": "cs_live_9sd8f7a98sd7f98asd7f98",
+    "webhookSecret": "whsec_8sd7f98sd7f98sd7f98",
+    "status": "active",
+    "verified": false
+  },
+  "message": "Registration successful. Please check your email to verify your account."
+}</code></pre>
+
+                        <div class="bg-blue-50 p-4 rounded-lg border-l-4 border-blue-500">
+                            <p class="text-sm text-blue-800">
+                                <i class="fas fa-info-circle mr-2"></i>
+                                A verification email will be sent to the provided email address. The merchant must
+                                verify their email before using the API.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Merchant Login -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/merchants/login</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Authenticate merchant and receive JWT token</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "email": "john@acmecorp.com",
+  "password": "SecurePass123!"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "merchant": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "firstName": "John",
+    "lastName": "Doe",
+    "businessName": "Acme Corp",
+    "email": "john@acmecorp.com",
+    "apiKey": "ck_live_8a7sd6f8a7sdf6a8s7df",
+    "apiSecret": "cs_live_9sd8f7a98sd7f98asd7f98",
+    "status": "active"
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Verify Email -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code
+                                    class="text-lg font-semibold text-gray-800">/api/merchants/verify-email?token={token}</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Verify merchant email address using token from email</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Query Parameters:</h4>
+                        <div class="mb-4">
+                            <code class="bg-gray-100 px-2 py-1 rounded">token</code>
+                            <span class="badge badge-required ml-2">Required</span>
+                            <span class="text-gray-600 ml-2">- Verification token from email</span>
+                        </div>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "message": "Email verified successfully"
+}</code></pre>
+                    </div>
+
+                    <!-- Get Dashboard -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/merchants/dashboard</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get merchant dashboard data with payments, stats, and filters</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Headers:</h4>
+                        <pre class="code-block mb-4"><code>x-api-key: your_api_key
+x-api-secret: your_api_secret</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Query Parameters (Optional):</h4>
+                        <div class="space-y-2 mb-4">
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">page</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                                <span class="text-gray-600 ml-2">- Page number (default: 1)</span>
+                            </div>
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">limit</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                                <span class="text-gray-600 ml-2">- Items per page (default: 4)</span>
+                            </div>
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">status</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                                <span class="text-gray-600 ml-2">- Filter by payment status</span>
+                            </div>
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">currency</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                                <span class="text-gray-600 ml-2">- Filter by currency</span>
+                            </div>
+                        </div>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "merchant": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "businessName": "Acme Corp",
+    "email": "john@acmecorp.com",
+    "walletAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+    "apiKey": "ck_live_8a7sd6f8a7sdf6a8s7df",
+    "status": "active",
+    "feeChargedTo": "customer"
+  },
+  "payments": {
+    "data": [...],
+    "totalCount": 150,
+    "totalPages": 38,
+    "currentPage": 1
+  },
+  "filters": {
+    "currencies": ["USDT", "USDC", "ETH"],
+    "statuses": ["pending", "completed", "failed"]
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Update Profile -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-put">PUT</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/merchants/profile</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Update merchant profile information</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "businessName": "Acme Corporation",
+  "phone": "+1234567890",
+  "country": "United States",
+  "industry": "E-commerce",
+  "website": "https://acmecorp.com",
+  "feeChargedTo": "merchant"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "merchant": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "businessName": "Acme Corporation",
+    "email": "john@acmecorp.com",
+    "phone": "+1234567890",
+    "country": "United States",
+    "industry": "E-commerce",
+    "website": "https://acmecorp.com",
+    "feeChargedTo": "merchant"
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Update Wallets -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-put">PUT</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/merchants/wallets</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Update merchant wallet addresses for different networks</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "wallets": [
+    {
+      "networkShortName": "ethereum",
+      "walletAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+      "supportedTokens": ["USDT", "USDC", "ETH"]
+    },
+    {
+      "networkShortName": "bsc",
+      "walletAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+      "supportedTokens": ["USDT", "BUSD"]
+    },
+    {
+      "networkShortName": "solana",
+      "walletAddress": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      "supportedTokens": ["USDT"]
+    }
+  ]
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "message": "Wallet addresses updated successfully",
+  "wallets": {
+    "ethereum": {
+      "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+      "supportedTokens": ["USDT", "USDC", "ETH"]
+    },
+    "bsc": {
+      "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+      "supportedTokens": ["USDT", "BUSD"]
+    },
+    "solana": {
+      "address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      "supportedTokens": ["USDT"]
+    }
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Get Wallets -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/merchants/wallets</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get merchant wallet addresses for all networks</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "wallets": [
+    {
+      "networkId": "uuid-1",
+      "networkName": "Ethereum",
+      "networkShortName": "ethereum",
+      "networkType": "ethereum",
+      "networkLogo": "https://...",
+      "walletAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+      "isConfigured": true
+    },
+    {
+      "networkId": "uuid-2",
+      "networkName": "Binance Smart Chain",
+      "networkShortName": "bsc",
+      "networkType": "ethereum",
+      "networkLogo": "https://...",
+      "walletAddress": "",
+      "isConfigured": false
+    }
+  ]
+}</code></pre>
+                    </div>
+
+                    <!-- Get Networks and Tokens -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code
+                                    class="text-lg font-semibold text-gray-800">/api/merchants/networks-and-tokens</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get merchant's configured networks and supported tokens</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "networks": [
+    {
+      "id": "uuid-1",
+      "name": "Ethereum",
+      "shortName": "ethereum",
+      "type": "ethereum",
+      "logo": "https://...",
+      "explorerUrl": "https://etherscan.io",
+      "chainId": "1"
+    }
+  ],
+  "tokens": [
+    {
+      "id": "uuid-1",
+      "name": "Tether USD",
+      "symbol": "USDT",
+      "contractAddress": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "decimals": 6,
+      "logo": "https://...",
+      "isStablecoin": true,
+      "networkId": "uuid-1"
+    }
+  ],
+  "merchantWallets": {
+    "ethereum": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb"
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Change Password -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-put">PUT</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/merchants/change-password</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Change merchant account password</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "currentPassword": "OldPass123!",
+  "newPassword": "NewSecurePass123!"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "message": "Password changed successfully"
+}</code></pre>
+                    </div>
+
+                    <!-- Forgot Password -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/merchants/forgot-password</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Request password reset OTP</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "email": "john@acmecorp.com"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "msg": "Password reset OTP sent to your email",
+  "resetToken": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+}</code></pre>
+                    </div>
+
+                    <!-- Verify OTP -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/merchants/verify-otp</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Verify OTP for password reset</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Headers:</h4>
+                        <pre class="code-block mb-4"><code>x-reset-token: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "otp": "1234"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "msg": "OTP verified successfully"
+}</code></pre>
+                    </div>
+
+                    <!-- Reset Password -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/merchants/reset-password</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Reset password after OTP verification</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Headers:</h4>
+                        <pre class="code-block mb-4"><code>x-reset-token: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "newPassword": "NewSecurePass123!"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "msg": "Password reset successful"
+}</code></pre>
+                    </div>
+                </section>
+
+                <!-- Payment Endpoints -->
+                <section id="payment" class="mb-8">
+                    <h2 class="text-3xl font-bold mb-6 text-gray-800 bg-white rounded-lg shadow-md p-6">
+                        <i class="fas fa-credit-card text-blue-600 mr-3"></i>Payment Endpoints
+                    </h2>
+
+                    <!-- Create Payment -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/payments/create</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Create a new payment using PaymentSplitter smart contract</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "amount": 100.50,
+  "currency": "USDT",
+  "network": "ethereum",
+  "customerEmail": "customer@example.com",
+  "callbackUrl": "https://yoursite.com/webhook",
+  "orderId": "ORDER-12345",
+  "metadata": {
+    "productName": "Premium Plan",
+    "customerId": "CUST-789"
+  }
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (201 Created):</h4>
+                        <pre class="code-block mb-4"><code>{
+  "success": true,
+  "requestId": "REQ-1234567890-abc123",
+  "amount": 100.50,
+  "payment": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "amount": 100.50,
+    "totalAmount": 100.50,
+    "currency": "USDT",
+    "network": "ethereum",
+    "status": "pending",
+    "expiresAt": "2024-01-15T12:00:00Z",
+    "paymentMethod": "splitter",
+    "splitterPaymentId": "1",
+    "contractAddress": "0x48E967d182F744EdB18AcA7092814f1FE17fcB2d",
+    "merchantWallet": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+    "coinleyWallet": "0x1234...",
+    "merchantPercentage": 99,
+    "coinleyPercentage": 1,
+    "chainId": 1,
+    "tokenAddress": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+    "tokenDecimals": 6
+  }
+}</code></pre>
+
+                        <div class="bg-green-50 p-4 rounded-lg border-l-4 border-green-500">
+                            <p class="text-sm text-green-800">
+                                <i class="fas fa-check-circle mr-2"></i>
+                                The PaymentSplitter contract automatically handles fee distribution between merchant and
+                                platform.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Get Payment -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/payments/:id</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get payment details by ID</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "amount": 100.50,
+  "totalAmount": 100.50,
+  "currency": "USDT",
+  "status": "completed",
+  "transactionHash": "0x1234567890abcdef...",
+  "merchantId": "uuid-merchant",
+  "Network": {
+    "name": "Ethereum",
+    "shortName": "ethereum",
+    "explorerUrl": "https://etherscan.io"
+  },
+  "Token": {
+    "symbol": "USDT",
+    "name": "Tether USD"
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Get Public Payment -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/payments/public/:paymentId</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get public payment details (optimized for payment screen)</p>
+                    </div>
+
+                    <!-- Process Payment -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/payments/process</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Process and confirm a payment transaction</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "paymentId": "550e8400-e29b-41d4-a716-446655440000",
+  "transactionHash": "0x1234567890abcdef..."
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "message": "Payment processed successfully",
+  "payment": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "completed",
+    "transactionHash": "0x1234567890abcdef...",
+    "amount": 100.50,
+    "currency": "USDT"
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Get Merchant Payments -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/payments/merchant/list</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">List all payments for authenticated merchant</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Query Parameters (Optional):</h4>
+                        <div class="space-y-2 mb-4">
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">page</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                            </div>
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">limit</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                            </div>
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">status</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                            </div>
+                        </div>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "payments": [...],
+  "pagination": {
+    "currentPage": 1,
+    "totalPages": 10,
+    "totalCount": 100
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Get Payment Stats -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/payments/merchant/stats</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">
+                            Get comprehensive payment statistics and metrics for merchant dashboard. This endpoint
+                            provides real-time analytics including transaction counts, revenue totals, and fee
+                            calculations.
+                        </p>
+
+                        <div class="bg-blue-50 p-4 rounded-lg border-l-4 border-blue-500 mb-4">
+                            <h5 class="font-semibold text-blue-900 mb-2">
+                                <i class="fas fa-chart-line mr-2"></i>Dashboard Analytics
+                            </h5>
+                            <p class="text-sm text-blue-800">
+                                This endpoint powers the merchant dashboard with live transaction metrics, completion
+                                rates, revenue tracking, and average payment amounts. All amounts are returned as
+                                decimal strings for precision.
+                            </p>
+                        </div>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Headers:</h4>
+                        <pre class="code-block mb-4"><code>x-api-key: your_api_key
+x-api-secret: your_api_secret</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block mb-4"><code>{
+  "success": true,
+  "stats": {
+    "totalPayments": 1573,
+    "completedPayments": 570,
+    "pendingPayments": 801,
+    "failedPayments": 202,
+    "totalAmount": "245.34",
+    "totalFeeAmount": "2.82",
+    "averageAmount": "0.43"
+  }
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response Fields:</h4>
+                        <div class="space-y-3">
+                            <div class="border-l-4 border-green-500 bg-green-50 p-3 rounded-r">
+                                <code class="font-semibold text-green-900">totalPayments</code>
+                                <span class="text-sm text-green-700 ml-2">(integer)</span>
+                                <p class="text-sm text-green-800 mt-1">Total number of PaymentSplitter transactions
+                                    created by the merchant</p>
+                            </div>
+                            <div class="border-l-4 border-blue-500 bg-blue-50 p-3 rounded-r">
+                                <code class="font-semibold text-blue-900">completedPayments</code>
+                                <span class="text-sm text-blue-700 ml-2">(integer)</span>
+                                <p class="text-sm text-blue-800 mt-1">Number of successfully completed transactions</p>
+                            </div>
+                            <div class="border-l-4 border-yellow-500 bg-yellow-50 p-3 rounded-r">
+                                <code class="font-semibold text-yellow-900">pendingPayments</code>
+                                <span class="text-sm text-yellow-700 ml-2">(integer)</span>
+                                <p class="text-sm text-yellow-800 mt-1">Number of payments awaiting confirmation on the
+                                    blockchain</p>
+                            </div>
+                            <div class="border-l-4 border-red-500 bg-red-50 p-3 rounded-r">
+                                <code class="font-semibold text-red-900">failedPayments</code>
+                                <span class="text-sm text-red-700 ml-2">(integer)</span>
+                                <p class="text-sm text-red-800 mt-1">Number of failed or expired transactions</p>
+                            </div>
+                            <div class="border-l-4 border-purple-500 bg-purple-50 p-3 rounded-r">
+                                <code class="font-semibold text-purple-900">totalAmount</code>
+                                <span class="text-sm text-purple-700 ml-2">(string - decimal)</span>
+                                <p class="text-sm text-purple-800 mt-1">Total revenue from completed payments (in base
+                                    currency, e.g., USDT). Returned as string to preserve decimal precision.</p>
+                            </div>
+                            <div class="border-l-4 border-pink-500 bg-pink-50 p-3 rounded-r">
+                                <code class="font-semibold text-pink-900">totalFeeAmount</code>
+                                <span class="text-sm text-pink-700 ml-2">(string - decimal)</span>
+                                <p class="text-sm text-pink-800 mt-1">Total fees collected from completed payments. Fees
+                                    are automatically distributed via PaymentSplitter smart contracts.</p>
+                            </div>
+                            <div class="border-l-4 border-indigo-500 bg-indigo-50 p-3 rounded-r">
+                                <code class="font-semibold text-indigo-900">averageAmount</code>
+                                <span class="text-sm text-indigo-700 ml-2">(string - decimal)</span>
+                                <p class="text-sm text-indigo-800 mt-1">Average payment amount (totalAmount ÷
+                                    completedPayments). Useful for revenue analytics and forecasting.</p>
+                            </div>
+                        </div>
+
+                        <div class="bg-yellow-50 p-4 rounded-lg border-l-4 border-yellow-400 mt-4">
+                            <p class="text-sm text-yellow-800">
+                                <i class="fas fa-lightbulb mr-2"></i>
+                                <strong>Usage Tip:</strong> This endpoint is called by the merchant dashboard to display
+                                real-time statistics. The data is filtered to only include PaymentSplitter transactions
+                                for accurate fee tracking.
+                            </p>
+                        </div>
+
+                        <h4 class="font-semibold text-gray-800 mb-2 mt-4">Example Usage (JavaScript):</h4>
+                        <pre class="code-block"><code>// Fetch merchant stats for dashboard
+const response = await fetch('https://api.coinley.io/api/payments/merchant/stats', {
+  method: 'GET',
+  headers: {
+    'x-api-key': 'your_api_key',
+    'x-api-secret': 'your_api_secret'
+  }
+});
+
+const data = await response.json();
+
+if (data.success) {
+  console.log('Total Revenue:', data.stats.totalAmount);
+  console.log('Completion Rate:',
+    (data.stats.completedPayments / data.stats.totalPayments * 100).toFixed(1) + '%'
+  );
+  console.log('Average Transaction:', data.stats.averageAmount);
+}
+
+// Calculate dashboard metrics
+const completionRate = (
+  data.stats.completedPayments / data.stats.totalPayments * 100
+).toFixed(1);
+
+const dashboardStats = {
+  totalRevenue: {
+    value: data.stats.totalAmount,
+    change: '+12.5%' // Calculate from historical data
+  },
+  totalTransactions: {
+    value: data.stats.totalPayments,
+    change: '+8.3%'
+  },
+  completedRate: {
+    value: completionRate + '%',
+    change: '+2.1%'
+  },
+  pendingTransactions: {
+    value: data.stats.pendingPayments,
+    change: '-5.2%'
+  }
+};</code></pre>
+                    </div>
+
+                    <!-- Check Payment Status -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/payments/status/:paymentId</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Check real-time payment status from blockchain</p>
+                    </div>
+
+                    <!-- Get PaymentSplitter Status -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code
+                                    class="text-lg font-semibold text-gray-800">/api/payments/splitter-status/:paymentId</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get PaymentSplitter contract status for a payment</p>
+                    </div>
+
+                    <!-- Health Check -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/payments/health</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Payment service health check</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "status": "OK",
+  "message": "Payment service is operational"
+}</code></pre>
+                    </div>
+                </section>
+
+                <!-- Team Members Endpoints -->
+                <section id="team-members" class="mb-8">
+                    <h2 class="text-3xl font-bold mb-6 text-gray-800 bg-white rounded-lg shadow-md p-6">
+                        <i class="fas fa-users text-blue-600 mr-3"></i>Team Member Endpoints
+                    </h2>
+
+                    <!-- Invite Team Member -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/team-members/invite</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Invite a new team member to merchant account</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "firstName": "Jane",
+  "lastName": "Smith",
+  "email": "jane@acmecorp.com",
+  "role": "manager"
+}</code></pre>
+
+                        <div class="bg-blue-50 p-4 rounded-lg border-l-4 border-blue-500 mb-4">
+                            <h5 class="font-semibold text-blue-900 mb-2">Available Roles:</h5>
+                            <ul class="text-sm text-blue-800 space-y-1">
+                                <li><strong>admin</strong> - Full access to all features</li>
+                                <li><strong>manager</strong> - Operations focus with transaction management</li>
+                                <li><strong>finance</strong> - Finance-specific access with export capabilities</li>
+                                <li><strong>viewer</strong> - Read-only access</li>
+                            </ul>
+                        </div>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (201 Created):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "message": "Team member invited successfully",
+  "teamMember": {
+    "id": "uuid-team-member",
+    "firstName": "Jane",
+    "lastName": "Smith",
+    "email": "jane@acmecorp.com",
+    "role": "manager",
+    "status": "pending"
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Accept Invitation -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code
+                                    class="text-lg font-semibold text-gray-800">/api/team-members/accept-invitation</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Accept team invitation and set password</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "token": "invite_token_from_email",
+  "password": "SecurePass123!"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "message": "Invitation accepted successfully",
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "teamMember": {
+    "id": "uuid-team-member",
+    "firstName": "Jane",
+    "lastName": "Smith",
+    "email": "jane@acmecorp.com",
+    "role": "manager",
+    "permissions": {...},
+    "merchantId": "uuid-merchant"
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Team Member Login -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/team-members/login</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Authenticate team member</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "email": "jane@acmecorp.com",
+  "password": "SecurePass123!"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "teamMember": {
+    "id": "uuid-team-member",
+    "firstName": "Jane",
+    "lastName": "Smith",
+    "email": "jane@acmecorp.com",
+    "role": "manager",
+    "permissions": {...},
+    "merchantId": "uuid-merchant",
+    "merchantName": "Acme Corp"
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- List Team Members -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/team-members/</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get all team members for merchant</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "teamMembers": [
+    {
+      "id": "uuid-1",
+      "firstName": "Jane",
+      "lastName": "Smith",
+      "email": "jane@acmecorp.com",
+      "role": "manager",
+      "status": "active",
+      "lastLoginAt": "2024-01-15T10:30:00Z",
+      "createdAt": "2024-01-01T00:00:00Z"
+    }
+  ]
+}</code></pre>
+                    </div>
+
+                    <!-- Update Team Member -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-put">PUT</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/team-members/:teamMemberId</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Update team member details</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "firstName": "Jane",
+  "lastName": "Doe",
+  "role": "admin",
+  "status": "active"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "message": "Team member updated successfully",
+  "teamMember": {
+    "id": "uuid-team-member",
+    "firstName": "Jane",
+    "lastName": "Doe",
+    "email": "jane@acmecorp.com",
+    "role": "admin",
+    "status": "active",
+    "permissions": {...}
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Delete Team Member -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-delete">DELETE</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/team-members/:teamMemberId</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Remove team member from merchant account</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "message": "Team member deleted successfully"
+}</code></pre>
+                    </div>
+
+                    <!-- Get Permissions -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code
+                                    class="text-lg font-semibold text-gray-800">/api/team-members/:teamMemberId/permissions</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get team member permissions</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "role": "manager",
+  "permissions": {
+    "dashboard": { "view": true, "edit": false },
+    "transactions": { "view": true, "edit": true, "export": true },
+    "payments": { "view": true, "edit": true, "manage": false },
+    "profile": { "view": true, "edit": true },
+    "settings": { "view": true, "edit": false },
+    "administrators": { "view": true, "edit": false, "invite": false, "delete": false }
+  },
+  "defaultPermissions": {...}
+}</code></pre>
+                    </div>
+
+                    <!-- Get My Permissions -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code
+                                    class="text-lg font-semibold text-gray-800">/api/team-members/my-permissions</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get current user's permissions (supports both merchants and team
+                            members)</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "permissions": {...},
+  "role": "manager",
+  "isOwner": false
+}</code></pre>
+                    </div>
+                </section>
+
+                <!-- Network Endpoints -->
+                <section id="network" class="mb-8">
+                    <h2 class="text-3xl font-bold mb-6 text-gray-800 bg-white rounded-lg shadow-md p-6">
+                        <i class="fas fa-network-wired text-blue-600 mr-3"></i>Network Endpoints
+                    </h2>
+
+                    <!-- Get Networks -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/networks/</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get all supported blockchain networks (filtered by merchant's
+                            configured wallets)</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "networks": [
+    {
+      "id": "uuid-1",
+      "name": "Ethereum",
+      "shortName": "ethereum",
+      "chainId": "1",
+      "rpcUrl": "https://eth.llamarpc.com",
+      "explorerUrl": "https://etherscan.io",
+      "type": "ethereum",
+      "logo": "https://...",
+      "isTestnet": false,
+      "status": "active",
+      "paymentSplitterAddress": "0x48E967d182F744EdB18AcA7092814f1FE17fcB2d"
+    }
+  ]
+}</code></pre>
+                    </div>
+
+                    <!-- Get Network Tokens -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/networks/:networkId/tokens</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get all supported tokens for a specific network</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "tokens": [
+    {
+      "id": "uuid-1",
+      "networkId": "uuid-network",
+      "name": "Tether USD",
+      "symbol": "USDT",
+      "contractAddress": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "decimals": 6,
+      "logo": "https://...",
+      "minAmount": "1",
+      "isStablecoin": true,
+      "status": "active"
+    }
+  ]
+}</code></pre>
+                    </div>
+
+                    <!-- Get Stablecoins -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/networks/stablecoins</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Auth Required
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get all stablecoins across all networks</p>
+                    </div>
+                </section>
+
+                <!-- Admin Endpoints -->
+                <section id="admin" class="mb-8">
+                    <h2 class="text-3xl font-bold mb-6 text-gray-800 bg-white rounded-lg shadow-md p-6">
+                        <i class="fas fa-user-shield text-blue-600 mr-3"></i>Admin Endpoints
+                    </h2>
+
+                    <!-- Register Admin -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/admin/register</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public (Requires Setup Code)</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Register a new admin account (max 3 admins)</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "name": "Admin User",
+  "email": "admin@coinley.io",
+  "password": "SecureAdminPass123!",
+  "walletAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+  "setupCode": "secure_admin_setup_2024"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (201 Created):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "admin": {
+    "id": "uuid-admin",
+    "name": "Admin User",
+    "email": "admin@coinley.io"
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Admin Login -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/admin/login</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Authenticate admin user</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "email": "admin@coinley.io",
+  "password": "SecureAdminPass123!"
+}</code></pre>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "admin": {
+    "id": "uuid-admin",
+    "email": "admin@coinley.io",
+    "name": "Admin User",
+    "walletAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb"
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Get Admin Dashboard -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/admin/dashboard</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Admin Auth
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get comprehensive admin dashboard with statistics</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "data": {
+    "merchants": {
+      "data": [...],
+      "count": 50
+    },
+    "statistics": {
+      "totalMerchants": 50,
+      "totalPayments": 1500,
+      "completedPayments": 1420,
+      "pendingPayments": 75,
+      "totalRevenue": 150000.00,
+      "totalFeeRevenue": 2250.00,
+      "conversionRate": "94.7"
+    },
+    "feeTransactions": [...],
+    "monthlyStats": [...]
+  }
+}</code></pre>
+                    </div>
+
+                    <!-- Get All Merchants -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/admin/merchants</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Admin Auth
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">List all merchants with pagination and filtering</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Query Parameters:</h4>
+                        <div class="space-y-2 mb-4">
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">page</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                            </div>
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">limit</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                            </div>
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">search</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                            </div>
+                            <div>
+                                <code class="bg-gray-100 px-2 py-1 rounded">status</code>
+                                <span class="badge badge-optional ml-2">Optional</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Update Merchant Status -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-put">PUT</span>
+                                <code
+                                    class="text-lg font-semibold text-gray-800">/api/admin/merchants/:merchantId/status</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Admin Auth
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Update merchant account status</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "status": "suspended"
+}</code></pre>
+
+                        <div class="bg-blue-50 p-4 rounded-lg border-l-4 border-blue-500 mb-4">
+                            <p class="text-sm text-blue-800">
+                                <strong>Valid Statuses:</strong> active, inactive, suspended
+                            </p>
+                        </div>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "message": "Merchant status updated successfully"
+}</code></pre>
+                    </div>
+
+                    <!-- Get/Update Merchant Fee -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <span class="method-badge method-put">PUT</span>
+                                <code
+                                    class="text-lg font-semibold text-gray-800">/api/admin/merchants/:merchantId/fee</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Admin Auth
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get or update merchant custom fee percentage</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">PUT Request Body:</h4>
+                        <pre class="code-block mb-4"><code>{
+  "customFeePercentage": 0.02
+}</code></pre>
+
+                        <div class="bg-yellow-50 p-4 rounded-lg border-l-4 border-yellow-400">
+                            <p class="text-sm text-yellow-800">
+                                Fee percentage must be between 0 and 1 (e.g., 0.01 = 1%). Default is 1%.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Fee Analytics -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/admin/fees/analytics</code>
+                            </div>
+                            <span class="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">
+                                <i class="fas fa-lock mr-1"></i>Admin Auth
+                            </span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get fee analytics and statistics</p>
+                    </div>
+
+                    <!-- Seed Networks -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/admin/seed-networks</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Seed initial networks and tokens (for setup)</p>
+
+                        <h4 class="font-semibold text-gray-800 mb-2">Response (200 OK):</h4>
+                        <pre class="code-block"><code>{
+  "success": true,
+  "message": "Networks and tokens seeded successfully"
+}</code></pre>
+                    </div>
+                </section>
+
+                <!-- Waitlist Endpoints -->
+                <section id="waitlist" class="mb-8">
+                    <h2 class="text-3xl font-bold mb-6 text-gray-800 bg-white rounded-lg shadow-md p-6">
+                        <i class="fas fa-list text-blue-600 mr-3"></i>Waitlist Endpoints
+                    </h2>
+
+                    <!-- Create Waitlist Entry -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-post">POST</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/waitlists/create</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Add email to waitlist</p>
+                    </div>
+
+                    <!-- Get All Waitlist Entries -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/waitlists/</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get all waitlist entries</p>
+                    </div>
+
+                    <!-- Get Waitlist Entry -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-get">GET</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/waitlists/:id</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Get specific waitlist entry by ID</p>
+                    </div>
+
+                    <!-- Update Waitlist Entry -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-put">PUT</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/waitlists/:id</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Update waitlist entry</p>
+                    </div>
+
+                    <!-- Delete Waitlist Entry -->
+                    <div class="endpoint-card bg-white rounded-lg shadow-md p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span class="method-badge method-delete">DELETE</span>
+                                <code class="text-lg font-semibold text-gray-800">/api/waitlists/:id</code>
+                            </div>
+                            <span class="text-sm text-gray-500">Public</span>
+                        </div>
+                        <p class="text-gray-600 mb-4">Delete waitlist entry</p>
+                    </div>
+                </section>
+
+                <!-- Error Codes Section -->
+                <section id="errors" class="bg-white rounded-lg shadow-md p-8 mb-8">
+                    <h2 class="text-3xl font-bold mb-6 text-gray-800">
+                        <i class="fas fa-exclamation-triangle text-red-600 mr-3"></i>Error Codes
+                    </h2>
+
+                    <div class="space-y-4">
+                        <div class="border-l-4 border-red-500 bg-red-50 p-4 rounded-r-lg">
+                            <h4 class="font-semibold text-red-900 mb-2">400 Bad Request</h4>
+                            <p class="text-red-700 text-sm">Invalid request parameters or validation error</p>
+                            <pre class="code-block mt-2 text-xs"><code>{ "error": "Invalid amount format" }</code></pre>
+                        </div>
+
+                        <div class="border-l-4 border-yellow-500 bg-yellow-50 p-4 rounded-r-lg">
+                            <h4 class="font-semibold text-yellow-900 mb-2">401 Unauthorized</h4>
+                            <p class="text-yellow-700 text-sm">Missing or invalid authentication credentials</p>
+                            <pre
+                                class="code-block mt-2 text-xs"><code>{ "error": "Authentication required - merchant info missing" }</code></pre>
+                        </div>
+
+                        <div class="border-l-4 border-orange-500 bg-orange-50 p-4 rounded-r-lg">
+                            <h4 class="font-semibold text-orange-900 mb-2">403 Forbidden</h4>
+                            <p class="text-orange-700 text-sm">Valid credentials but insufficient permissions</p>
+                            <pre class="code-block mt-2 text-xs"><code>{ "error": "Invalid setup code" }</code></pre>
+                        </div>
+
+                        <div class="border-l-4 border-blue-500 bg-blue-50 p-4 rounded-r-lg">
+                            <h4 class="font-semibold text-blue-900 mb-2">404 Not Found</h4>
+                            <p class="text-blue-700 text-sm">Requested resource does not exist</p>
+                            <pre class="code-block mt-2 text-xs"><code>{ "error": "Payment not found" }</code></pre>
+                        </div>
+
+                        <div class="border-l-4 border-purple-500 bg-purple-50 p-4 rounded-r-lg">
+                            <h4 class="font-semibold text-purple-900 mb-2">500 Internal Server Error</h4>
+                            <p class="text-purple-700 text-sm">Server encountered an unexpected error</p>
+                            <pre
+                                class="code-block mt-2 text-xs"><code>{ "error": "Failed to create payment session", "message": "..." }</code></pre>
+                        </div>
+                    </div>
+
+                    <div class="mt-6 bg-gray-50 p-4 rounded-lg">
+                        <h4 class="font-semibold text-gray-800 mb-2">
+                            <i class="fas fa-info-circle mr-2"></i>Error Response Format
+                        </h4>
+                        <p class="text-gray-600 text-sm mb-3">All errors follow a consistent JSON structure:</p>
+                        <pre class="code-block"><code>{
+  "error": "Brief error description",
+  "message": "Detailed error message (optional)",
+  "success": false
+}</code></pre>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 text-white py-8 mt-12">
+        <div class="container mx-auto px-6">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div>
+                    <h3 class="text-xl font-bold mb-4">
+                        <i class="fas fa-coins mr-2"></i>Coinley API
+                    </h3>
+                    <p class="text-gray-400">Cryptocurrency Payment Gateway Platform</p>
+                </div>
+                <div>
+                    <h4 class="font-semibold mb-4">Resources</h4>
+                    <ul class="space-y-2 text-gray-400">
+                        <li><a href="#overview" class="hover:text-white"><i
+                                    class="fas fa-chevron-right mr-2"></i>Getting Started</a></li>
+                        <li><a href="#authentication" class="hover:text-white"><i
+                                    class="fas fa-chevron-right mr-2"></i>Authentication</a></li>
+                        <li><a href="#errors" class="hover:text-white"><i class="fas fa-chevron-right mr-2"></i>Error
+                                Handling</a></li>
+                    </ul>
+                </div>
+                <div>
+                    <h4 class="font-semibold mb-4">Support</h4>
+                    <p class="text-gray-400 mb-2">
+                        <i class="fas fa-envelope mr-2"></i>Info@coinley.io
+                    </p>
+                    <p class="text-gray-400">
+                        <i class="fas fa-globe mr-2"></i>https://coinley.io
+                    </p>
+                </div>
+            </div>
+            <div class="border-t border-gray-700 mt-8 pt-8 text-center text-gray-400">
+                <p>&copy; 2024 Coinley. All rights reserved.</p>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Search functionality
+        document.getElementById('searchInput').addEventListener('input', function (e) {
+            const searchTerm = e.target.value.toLowerCase();
+            const endpoints = document.querySelectorAll('.endpoint-card');
+
+            endpoints.forEach(endpoint => {
+                const text = endpoint.textContent.toLowerCase();
+                if (text.includes(searchTerm)) {
+                    endpoint.style.display = 'block';
+                } else {
+                    endpoint.style.display = 'none';
+                }
+            });
+        });
+
+        // Smooth scrolling for navigation
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
+                    });
+
+                    // Update active nav link
+                    document.querySelectorAll('.nav-link').forEach(link => {
+                        link.classList.remove('active');
+                    });
+                    this.classList.add('active');
+                }
+            });
+        });
+
+        // Highlight active section on scroll
+        window.addEventListener('scroll', function () {
+            const sections = document.querySelectorAll('section[id]');
+            const scrollPosition = window.scrollY + 100;
+
+            sections.forEach(section => {
+                const sectionTop = section.offsetTop;
+                const sectionHeight = section.offsetHeight;
+                const sectionId = section.getAttribute('id');
+
+                if (scrollPosition >= sectionTop && scrollPosition < sectionTop + sectionHeight) {
+                    document.querySelectorAll('.nav-link').forEach(link => {
+                        link.classList.remove('active');
+                        if (link.getAttribute('href') === `#${sectionId}`) {
+                            link.classList.add('active');
+                        }
+                    });
+                }
+            });
+        });
+
+        // Copy code block to clipboard
+        document.querySelectorAll('.code-block').forEach(block => {
+            block.style.position = 'relative';
+            const copyButton = document.createElement('button');
+            copyButton.innerHTML = '<i class="fas fa-copy"></i>';
+            copyButton.className = 'absolute top-2 right-2 bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-sm transition';
+            copyButton.onclick = function () {
+                const code = block.textContent;
+                navigator.clipboard.writeText(code).then(() => {
+                    copyButton.innerHTML = '<i class="fas fa-check"></i> Copied!';
+                    setTimeout(() => {
+                        copyButton.innerHTML = '<i class="fas fa-copy"></i>';
+                    }, 2000);
+                });
+            };
+            block.appendChild(copyButton);
+        });
+
+        // Scroll to top button
+        const scrollToTop = document.createElement('button');
+        scrollToTop.innerHTML = '<i class="fas fa-arrow-up"></i>';
+        scrollToTop.className = 'fixed bottom-8 right-8 bg-blue-600 hover:bg-blue-700 text-white w-12 h-12 rounded-full shadow-lg transition opacity-0 pointer-events-none';
+        scrollToTop.onclick = () => window.scrollTo({ top: 0, behavior: 'smooth' });
+        document.body.appendChild(scrollToTop);
+
+        window.addEventListener('scroll', () => {
+            if (window.scrollY > 300) {
+                scrollToTop.style.opacity = '1';
+                scrollToTop.style.pointerEvents = 'auto';
+            } else {
+                scrollToTop.style.opacity = '0';
+                scrollToTop.style.pointerEvents = 'none';
+            }
+        });
+    </script>
+</body>
+
+</html>

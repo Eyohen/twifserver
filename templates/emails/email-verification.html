@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Verify Your Email - {{appName}}</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f4;">
+  <table role="presentation" style="width: 100%; border-collapse: collapse;">
+    <tr>
+      <td align="center" style="padding: 40px 0;">
+        <table role="presentation" style="width: 600px; max-width: 100%; border-collapse: collapse; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+          <!-- Header -->
+          <tr>
+            <td style="padding: 40px 40px 20px; text-align: center; background: linear-gradient(135deg, #28A745 0%, #20c997 100%); border-radius: 12px 12px 0 0;">
+              <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 700;">{{appName}}</h1>
+              <p style="margin: 8px 0 0; color: rgba(255, 255, 255, 0.9); font-size: 14px;">{{appTagline}}</p>
+            </td>
+          </tr>
+
+          <!-- Main Content -->
+          <tr>
+            <td style="padding: 40px;">
+              <h2 style="margin: 0 0 20px; color: #333333; font-size: 24px; font-weight: 600;">Verify Your Email Address</h2>
+
+              <p style="margin: 0 0 20px; color: #555555; font-size: 16px; line-height: 1.6;">
+                Welcome to {{appName}}! You're just one step away from activating your account and getting started.
+              </p>
+
+              <p style="margin: 0 0 30px; color: #555555; font-size: 16px; line-height: 1.6;">
+                Please click the button below to verify your email address and activate your account:
+              </p>
+
+              <!-- CTA Button -->
+              <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                <tr>
+                  <td align="center" style="padding: 20px 0;">
+                    <a href="{{verificationUrl}}" style="display: inline-block; background: linear-gradient(135deg, #28A745 0%, #20c997 100%); color: #ffffff; text-decoration: none; padding: 16px 40px; border-radius: 8px; font-size: 16px; font-weight: 600; box-shadow: 0 4px 15px rgba(40, 167, 69, 0.3);">
+                      Verify Email Address
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin: 30px 0 15px; color: #777777; font-size: 14px; line-height: 1.6;">
+                Or copy and paste this link in your browser:
+              </p>
+
+              <p style="margin: 0 0 30px; padding: 15px; background-color: #f8f9fa; border-radius: 6px; word-break: break-all; font-size: 13px; color: #28A745;">
+                {{verificationUrl}}
+              </p>
+
+              <div style="padding: 20px; background-color: #fff3cd; border-radius: 8px; border-left: 4px solid #ffc107;">
+                <p style="margin: 0; color: #856404; font-size: 14px;">
+                  <strong>Note:</strong> This verification link will expire in 24 hours. If you didn't create an account with {{appName}}, you can safely ignore this email.
+                </p>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 30px 40px; background-color: #f8f9fa; border-radius: 0 0 12px 12px;">
+              <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                <tr>
+                  <td style="text-align: center;">
+                    <p style="margin: 0 0 15px; color: #666666; font-size: 14px;">
+                      Need help? <a href="{{supportUrl}}" style="color: #28A745; text-decoration: none;">Contact Support</a>
+                    </p>
+                    <p style="margin: 0 0 15px; color: #999999; font-size: 12px;">
+                      <a href="{{privacyUrl}}" style="color: #999999; text-decoration: none;">Privacy Policy</a> &nbsp;|&nbsp;
+                      <a href="{{termsUrl}}" style="color: #999999; text-decoration: none;">Terms of Service</a>
+                    </p>
+                    <p style="margin: 0; color: #999999; font-size: 12px;">
+                      &copy; {{currentYear}} {{appName}}. All rights reserved.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

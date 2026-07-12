@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Payment Received - {{appName}}</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f4;">
+  <table role="presentation" style="width: 100%; border-collapse: collapse;">
+    <tr>
+      <td align="center" style="padding: 40px 0;">
+        <table role="presentation" style="width: 600px; max-width: 100%; border-collapse: collapse; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+          <!-- Header -->
+          <tr>
+            <td style="padding: 40px 40px 20px; text-align: center; background: linear-gradient(135deg, #28A745 0%, #20c997 100%); border-radius: 12px 12px 0 0;">
+              <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 700;">{{appName}}</h1>
+              <p style="margin: 8px 0 0; color: rgba(255, 255, 255, 0.9); font-size: 14px;">{{appTagline}}</p>
+            </td>
+          </tr>
+
+          <!-- Main Content -->
+          <tr>
+            <td style="padding: 40px;">
+              <div style="text-align: center; margin-bottom: 30px;">
+                <div style="display: inline-block; width: 80px; height: 80px; background-color: #d4edda; border-radius: 50%; line-height: 80px; font-size: 40px;">
+                  <span style="color: #28A745;">&#128176;</span>
+                </div>
+              </div>
+
+              <h2 style="margin: 0 0 10px; color: #333333; font-size: 24px; font-weight: 600; text-align: center;">Payment Received!</h2>
+
+              <p style="margin: 0 0 30px; color: #555555; font-size: 16px; line-height: 1.6; text-align: center;">
+                Great job! You've received a payment for your work.
+              </p>
+
+              <!-- Payment Details Card -->
+              <div style="background: linear-gradient(135deg, #28A745 0%, #20c997 100%); border-radius: 12px; padding: 30px; margin-bottom: 30px; text-align: center; color: white;">
+                <p style="margin: 0 0 10px; font-size: 14px; opacity: 0.9;">Amount Received</p>
+                <p style="margin: 0 0 15px; font-size: 42px; font-weight: 700;">&#8358;{{amount}}</p>
+                <p style="margin: 0; font-size: 14px; opacity: 0.9;">For: {{campaignTitle}}</p>
+              </div>
+
+              <div style="background-color: #f8f9fa; border-radius: 8px; padding: 20px; margin-bottom: 30px;">
+                <p style="margin: 0; color: #666; font-size: 14px; line-height: 1.6;">
+                  This payment has been credited to your {{appName}} account. You can review it any time from your dashboard.
+                </p>
+              </div>
+
+              <!-- CTA Button -->
+              <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                <tr>
+                  <td align="center" style="padding: 10px 0;">
+                    <a href="{{earningsUrl}}" style="display: inline-block; background: linear-gradient(135deg, #28A745 0%, #20c997 100%); color: #ffffff; text-decoration: none; padding: 16px 40px; border-radius: 8px; font-size: 16px; font-weight: 600; box-shadow: 0 4px 15px rgba(40, 167, 69, 0.3);">
+                      View Earnings
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 30px 40px; background-color: #f8f9fa; border-radius: 0 0 12px 12px;">
+              <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                <tr>
+                  <td style="text-align: center;">
+                    <p style="margin: 0 0 15px; color: #666666; font-size: 14px;">
+                      Need help? <a href="{{supportUrl}}" style="color: #28A745; text-decoration: none;">Contact Support</a>
+                    </p>
+                    <p style="margin: 0 0 15px; color: #999999; font-size: 12px;">
+                      <a href="{{privacyUrl}}" style="color: #999999; text-decoration: none;">Privacy Policy</a> &nbsp;|&nbsp;
+                      <a href="{{termsUrl}}" style="color: #999999; text-decoration: none;">Terms of Service</a>
+                    </p>
+                    <p style="margin: 0; color: #999999; font-size: 12px;">
+                      &copy; {{currentYear}} {{appName}}. All rights reserved.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "timestamp": "2025-09-14T17:20:44.521Z",
+  "environment": "development",
+  "database": {
+    "dialect": "postgres",
+    "version": "PostgreSQL 16.10 on x86_64-apple-darwin23.6.0, compiled by Apple clang version 16.0.0 (clang-1600.0.26.6), 64-bit"
+  },
+  "optimizations": {
+    "indexes": {
+      "total": 8,
+      "success": 0,
+      "failed": 8
+    },
+    "poolConfig": {
+      "max": 20,
+      "min": 2,
+      "acquire": 30000,
+      "idle": 10000,
+      "evict": 5000,
+      "handleDisconnects": true,
+      "dialectOptions": {
+        "keepAlive": true,
+        "keepAliveInitialDelay": 0,
+        "connectTimeout": 10000,
+        "statement_timeout": 30000,
+        "idle_in_transaction_session_timeout": 300000
+      }
+    }
+  },
+  "recommendations": []
+}
