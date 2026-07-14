@@ -80,6 +80,11 @@ const plainTextInvoice = (payload) => {
 
 const paymentStatusLabel = (status) => (status === 'fully_paid' ? 'Fully Paid' : 'Partial Paid');
 
+const customerTrackingStatus = (status) => {
+  if (status === 'Unassigned') return 'Order Sheet Confirmed';
+  return status || 'Order Sheet Pending';
+};
+
 const formatSentInvoice = (invoice) => {
   const payload = invoice.payload || {};
   const firstItem = Array.isArray(payload.items) ? payload.items[0] : null;
@@ -423,7 +428,7 @@ router.get('/track/:token', asyncHandler(async (req, res) => {
         item: orderSheet.item || firstItem?.description || '',
         pieces: Number(orderSheet.pieces || firstItem?.quantity || 1),
         deliveryDate: orderSheet.delivery || payload.dueDate || '',
-        status: orderSheet.status || 'Order Sheet Pending',
+        status: customerTrackingStatus(orderSheet.status),
         fabric: orderSheet.fabric || '',
         measurementsAdded: Boolean(orderSheet.measurements),
         designNotesAdded: Boolean(orderSheet.designNotes),
@@ -456,14 +461,14 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
     orderSheet: {
       ...(payload.orderSheet || {}),
       ...orderSheet,
-      status: orderSheet.status || 'Unassigned',
+      status: customerTrackingStatus(orderSheet.status || 'Order Sheet Confirmed'),
       updatedAt: new Date().toISOString(),
     },
   };
 
   await invoice.update({
     payload: nextPayload,
-    orderStatus: nextPayload.orderSheet.status,
+    orderStatus: customerTrackingStatus(nextPayload.orderSheet.status),
   });
 
   res.json({
@@ -472,7 +477,7 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
       tracking: {
         trackingToken: resolvedToken,
         trackingUrl: nextPayload.trackingUrl,
-        status: nextPayload.orderSheet.status,
+        status: customerTrackingStatus(nextPayload.orderSheet.status),
       },
     },
   });
@@ -500,7 +505,7 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       ...payload,
       orderSheet: nextOrderSheet,
     },
-    orderStatus: nextOrderSheet.status || invoice.orderStatus,
+    orderStatus: customerTrackingStatus(nextOrderSheet.status || invoice.orderStatus),
   });
 
   res.json({
@@ -509,7 +514,7 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       tracking: {
         trackingToken: req.params.token,
         trackingUrl: payload.trackingUrl || trackingUrlForToken(req.params.token),
-        status: nextOrderSheet.status,
+        status: customerTrackingStatus(nextOrderSheet.status),
       },
     },
   });
