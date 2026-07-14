@@ -22,21 +22,37 @@ const invoiceNumber = () => {
   return `TWIF-${year}-${suffix}`;
 };
 
-const buildInvoiceHtmlPayload = (body = {}) => ({
-  store: body.store || 'lekki',
-  invoiceNumber: body.invoiceNumber || invoiceNumber(),
-  invoiceDate: body.invoiceDate || new Date(),
-  dueDate: body.dueDate || new Date(),
-  customer: body.customer || {},
-  items: Array.isArray(body.items) ? body.items : [],
-  subtotal: body.subtotal,
-  eliteDiscountAmount: body.eliteDiscountAmount || 0,
-  storeCreditApplied: body.storeCreditApplied || 0,
-  balanceDue: body.balanceDue,
-  paymentStatus: body.paymentStatus || 'partial_paid',
-  trackingUrl: body.trackingUrl,
-  notes: body.notes,
-});
+const trackingBaseUrl = () => (process.env.TRACKING_BASE_URL || 'https://track.twiflagos.com').replace(/\/+$/, '');
+
+const trackingToken = () => crypto.randomBytes(8).toString('hex');
+
+const trackingTokenFromUrl = (value = '') => {
+  const match = String(value).match(/\/c\/([^/?#]+)/);
+  return match?.[1] || '';
+};
+
+const trackingUrlForToken = (token) => `${trackingBaseUrl()}/c/${token}`;
+
+const buildInvoiceHtmlPayload = (body = {}) => {
+  const token = body.trackingToken || trackingTokenFromUrl(body.trackingUrl) || trackingToken();
+
+  return {
+    store: body.store || 'lekki',
+    invoiceNumber: body.invoiceNumber || invoiceNumber(),
+    invoiceDate: body.invoiceDate || new Date(),
+    dueDate: body.dueDate || new Date(),
+    customer: body.customer || {},
+    items: Array.isArray(body.items) ? body.items : [],
+    subtotal: body.subtotal,
+    eliteDiscountAmount: body.eliteDiscountAmount || 0,
+    storeCreditApplied: body.storeCreditApplied || 0,
+    balanceDue: body.balanceDue,
+    paymentStatus: body.paymentStatus || 'partial_paid',
+    trackingToken: token,
+    trackingUrl: body.trackingUrl || trackingUrlForToken(token),
+    notes: body.notes,
+  };
+};
 
 const plainTextInvoice = (payload) => {
   const lines = [
@@ -82,7 +98,20 @@ const formatSentInvoice = (invoice) => {
     pieces: Number(firstItem?.quantity || 1),
     deliveryDate: payload.dueDate || payload.deliveryDate || '',
     itemNote: firstItem?.note || (Array.isArray(payload.notes) ? payload.notes[0] : '') || '',
+    trackingToken: payload.trackingToken || trackingTokenFromUrl(payload.trackingUrl),
+    trackingUrl: payload.trackingUrl || (payload.trackingToken ? trackingUrlForToken(payload.trackingToken) : ''),
   };
+};
+
+const findSentInvoiceByTrackingToken = async (token) => {
+  const invoices = await SentInvoice.findAll({
+    order: [['createdAt', 'DESC']],
+  });
+
+  return invoices.find((invoice) => {
+    const payload = invoice.payload || {};
+    return payload.trackingToken === token || trackingTokenFromUrl(payload.trackingUrl) === token;
+  });
 };
 
 router.get('/bootstrap', asyncHandler(async (req, res) => {
@@ -362,6 +391,122 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
       recipientEmail,
       messageId: result.messageId,
       sentInvoice: formatSentInvoice(sentInvoice),
+    },
+  });
+}));
+
+router.get('/track/:token', asyncHandler(async (req, res) => {
+  const invoice = await findSentInvoiceByTrackingToken(req.params.token);
+
+  if (!invoice) {
+    return res.status(404).json({
+      success: false,
+      message: 'Tracking link not found',
+    });
+  }
+
+  const payload = invoice.payload || {};
+  const firstItem = Array.isArray(payload.items) ? payload.items[0] : null;
+  const orderSheet = payload.orderSheet || {};
+
+  res.json({
+    success: true,
+    data: {
+      tracking: {
+        invoiceNumber: invoice.invoiceNumber,
+        customer: invoice.customerName,
+        store: invoice.store === 'ikeja' ? 'Ikeja' : 'Lekki',
+        item: orderSheet.item || firstItem?.description || '',
+        pieces: Number(orderSheet.pieces || firstItem?.quantity || 1),
+        deliveryDate: orderSheet.delivery || payload.dueDate || '',
+        status: orderSheet.status || 'Order Sheet Pending',
+        fabric: orderSheet.fabric || '',
+        measurementsAdded: Boolean(orderSheet.measurements),
+        designNotesAdded: Boolean(orderSheet.designNotes),
+        styleImagesCount: Array.isArray(orderSheet.styleImages) ? orderSheet.styleImages.length : 0,
+        lastUpdatedAt: orderSheet.updatedAt || invoice.updatedAt,
+      },
+    },
+  });
+}));
+
+router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
+  const { trackingToken: token, invoiceNumber: sentInvoiceNumber, orderSheet = {} } = req.body;
+  const invoice = token
+    ? await findSentInvoiceByTrackingToken(token)
+    : await SentInvoice.findOne({ where: { invoiceNumber: sentInvoiceNumber } });
+
+  if (!invoice) {
+    return res.status(404).json({
+      success: false,
+      message: 'Invoice tracking record not found',
+    });
+  }
+
+  const payload = invoice.payload || {};
+  const resolvedToken = payload.trackingToken || token || trackingTokenFromUrl(payload.trackingUrl) || trackingToken();
+  const nextPayload = {
+    ...payload,
+    trackingToken: resolvedToken,
+    trackingUrl: payload.trackingUrl || trackingUrlForToken(resolvedToken),
+    orderSheet: {
+      ...(payload.orderSheet || {}),
+      ...orderSheet,
+      status: orderSheet.status || 'Unassigned',
+      updatedAt: new Date().toISOString(),
+    },
+  };
+
+  await invoice.update({
+    payload: nextPayload,
+    orderStatus: nextPayload.orderSheet.status,
+  });
+
+  res.json({
+    success: true,
+    data: {
+      tracking: {
+        trackingToken: resolvedToken,
+        trackingUrl: nextPayload.trackingUrl,
+        status: nextPayload.orderSheet.status,
+      },
+    },
+  });
+}));
+
+router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
+  const invoice = await findSentInvoiceByTrackingToken(req.params.token);
+
+  if (!invoice) {
+    return res.status(404).json({
+      success: false,
+      message: 'Invoice tracking record not found',
+    });
+  }
+
+  const payload = invoice.payload || {};
+  const nextOrderSheet = {
+    ...(payload.orderSheet || {}),
+    ...req.body,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await invoice.update({
+    payload: {
+      ...payload,
+      orderSheet: nextOrderSheet,
+    },
+    orderStatus: nextOrderSheet.status || invoice.orderStatus,
+  });
+
+  res.json({
+    success: true,
+    data: {
+      tracking: {
+        trackingToken: req.params.token,
+        trackingUrl: payload.trackingUrl || trackingUrlForToken(req.params.token),
+        status: nextOrderSheet.status,
+      },
     },
   });
 }));
