@@ -265,7 +265,17 @@ const createTwifInvoiceHtml = ({
                   <td style="padding:22px 24px;color:#d8d8d8;">
                     <h3 style="margin:0 0 10px;color:#d3ab4f;font-size:14px;letter-spacing:.16em;text-transform:uppercase;">Track Your Order Online</h3>
                     <p style="margin:0 0 18px;color:#cccccc;font-size:13px;line-height:1.55;">Tap the link below to view your order status, delivery date, and membership progress — no login required.</p>
-                    <a href="${safeTrackingUrl}" style="display:inline-block;max-width:100%;background:#2b2b2b;border:1px solid #444;border-radius:5px;color:#ffffff;font-family:Monaco,Consolas,monospace;font-size:13px;font-weight:800;line-height:1.45;padding:10px 14px;text-decoration:none;word-break:break-all;">${safeTrackingUrl}</a>
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                      <tr>
+                        <td style="vertical-align:middle;">
+                          <a href="${safeTrackingUrl}" style="display:block;background:#2b2b2b;border:1px solid #444;border-radius:5px;color:#ffffff;font-family:Monaco,Consolas,monospace;font-size:13px;font-weight:800;line-height:1.45;padding:10px 14px;text-decoration:none;word-break:break-all;">${safeTrackingUrl}</a>
+                        </td>
+                        <td style="width:12px;"></td>
+                        <td style="width:112px;vertical-align:middle;">
+                          <a href="${safeTrackingUrl}" style="display:block;background:#d3ab4f;border-radius:5px;color:#171717;font-size:12px;font-weight:900;letter-spacing:.08em;line-height:1.45;padding:11px 12px;text-align:center;text-decoration:none;text-transform:uppercase;">Open Link</a>
+                        </td>
+                      </tr>
+                    </table>
                     <p style="margin:12px 0 0;color:#777;font-size:12px;text-align:center;">Unique to your account · Works on any device</p>
                   </td>
                 </tr>

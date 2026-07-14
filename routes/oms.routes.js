@@ -22,7 +22,11 @@ const invoiceNumber = () => {
   return `TWIF-${year}-${suffix}`;
 };
 
-const trackingBaseUrl = () => (process.env.TRACKING_BASE_URL || 'https://track.twiflagos.com').replace(/\/+$/, '');
+const trackingBaseUrl = () => (
+  process.env.TRACKING_BASE_URL ||
+  process.env.FRONTEND_URL ||
+  'http://localhost:5173'
+).replace(/\/+$/, '');
 
 const trackingToken = () => crypto.randomBytes(8).toString('hex');
 
