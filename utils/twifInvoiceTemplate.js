@@ -117,6 +117,7 @@ const createTwifInvoiceHtml = ({
   const safeInvoiceNumber = escapeHtml(invoiceNumber || 'INV00000');
   const storeLabel = escapeHtml(storeDetails.label);
   const safePaymentStatus = escapeHtml(paymentStatusLabel(paymentStatus));
+  const safeTrackingUrl = escapeHtml(trackingUrl || '#');
   const defaultNotes = [
     'Your order will be ready in 3–4 weeks from date of payment and measurements.',
     validityText,
@@ -259,14 +260,16 @@ const createTwifInvoiceHtml = ({
                 </tr>
               </table>
 
-              ${trackingUrl ? `
-                <div style="margin-top:34px;background:#171717;border-radius:7px;padding:22px 24px;color:#d8d8d8;">
-                  <h3 style="margin:0 0 10px;color:#d3ab4f;font-size:14px;letter-spacing:.16em;text-transform:uppercase;">Track Your Order Online</h3>
-                  <p style="margin:0 0 18px;color:#cccccc;font-size:13px;line-height:1.55;">Tap the link below to view your order status, delivery date, and membership progress — no login required.</p>
-                  <a href="${escapeHtml(trackingUrl)}" style="display:inline-block;background:#2b2b2b;border:1px solid #444;border-radius:5px;color:#ffffff;font-family:Monaco,Consolas,monospace;font-size:13px;font-weight:800;padding:10px 14px;text-decoration:none;">${escapeHtml(trackingUrl)}</a>
-                  <p style="margin:12px 0 0;color:#777;font-size:12px;text-align:center;">Unique to your account · Works on any device</p>
-                </div>
-              ` : ''}
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:34px;background:#171717;border-radius:7px;">
+                <tr>
+                  <td style="padding:22px 24px;color:#d8d8d8;">
+                    <h3 style="margin:0 0 10px;color:#d3ab4f;font-size:14px;letter-spacing:.16em;text-transform:uppercase;">Track Your Order Online</h3>
+                    <p style="margin:0 0 18px;color:#cccccc;font-size:13px;line-height:1.55;">Tap the link below to view your order status, delivery date, and membership progress — no login required.</p>
+                    <a href="${safeTrackingUrl}" style="display:inline-block;max-width:100%;background:#2b2b2b;border:1px solid #444;border-radius:5px;color:#ffffff;font-family:Monaco,Consolas,monospace;font-size:13px;font-weight:800;line-height:1.45;padding:10px 14px;text-decoration:none;word-break:break-all;">${safeTrackingUrl}</a>
+                    <p style="margin:12px 0 0;color:#777;font-size:12px;text-align:center;">Unique to your account · Works on any device</p>
+                  </td>
+                </tr>
+              </table>
 
               <div style="height:1px;background:#e5e5e5;margin:34px 0 18px;"></div>
 
