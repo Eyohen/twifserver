@@ -81,8 +81,8 @@ const plainTextInvoice = (payload) => {
 const paymentStatusLabel = (status) => (status === 'fully_paid' ? 'Fully Paid' : 'Partial Paid');
 
 const customerTrackingStatus = (status) => {
-  if (status === 'Unassigned') return 'Order Sheet Confirmed';
-  return status || 'Order Sheet Pending';
+  if (status === 'Ready' || status === 'Ready for Collection') return 'Ready for Collection';
+  return 'In Progress';
 };
 
 const formatSentInvoice = (invoice) => {
@@ -103,12 +103,14 @@ const formatSentInvoice = (invoice) => {
     emailStatus: invoice.emailStatus === 'failed' ? 'Failed' : 'Sent',
     paymentStatus: paymentStatusLabel(invoice.paymentStatus),
     orderStatus: invoice.orderStatus || paymentStatusLabel(invoice.paymentStatus),
+    accountApprovalStatus: payload.accountApprovalStatus || 'Pending Accounts',
     item: firstItem?.description || '',
     pieces: Number(firstItem?.quantity || 1),
     deliveryDate: payload.dueDate || payload.deliveryDate || '',
     itemNote: firstItem?.note || (Array.isArray(payload.notes) ? payload.notes[0] : '') || '',
     trackingToken: payload.trackingToken || trackingTokenFromUrl(payload.trackingUrl),
     trackingUrl: payload.trackingUrl || (payload.trackingToken ? trackingUrlForToken(payload.trackingToken) : ''),
+    orderSheet: payload.orderSheet || null,
   };
 };
 
@@ -385,6 +387,7 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     payload: {
       ...payload,
       recipientEmail,
+      accountApprovalStatus: 'Pending Accounts',
     },
   });
 
@@ -400,6 +403,43 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
       recipientEmail,
       messageId: result.messageId,
       sentInvoice: formatSentInvoice(sentInvoice),
+    },
+  });
+}));
+
+router.patch('/invoices/:invoiceNumber/account-approval', asyncHandler(async (req, res) => {
+  const { status = 'Approved', note = '' } = req.body;
+  const invoice = await SentInvoice.findOne({
+    where: { invoiceNumber: req.params.invoiceNumber },
+  });
+
+  if (!invoice) {
+    return res.status(404).json({
+      success: false,
+      message: 'Invoice not found',
+    });
+  }
+
+  const payload = invoice.payload || {};
+  const accountApprovalStatus = status === 'Flagged' ? 'Flagged' : 'Approved';
+
+  await invoice.update({
+    payload: {
+      ...payload,
+      accountApprovalStatus,
+      accountApprovalNote: note,
+      accountApprovedAt: accountApprovalStatus === 'Approved' ? new Date().toISOString() : null,
+    },
+  });
+
+  const refreshedInvoice = await SentInvoice.findOne({
+    where: { invoiceNumber: req.params.invoiceNumber },
+  });
+
+  res.json({
+    success: true,
+    data: {
+      invoice: formatSentInvoice(refreshedInvoice),
     },
   });
 }));
@@ -461,7 +501,7 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
     orderSheet: {
       ...(payload.orderSheet || {}),
       ...orderSheet,
-      status: customerTrackingStatus(orderSheet.status || 'Order Sheet Confirmed'),
+      status: orderSheet.status || payload.orderSheet?.status || 'Order Sheet Confirmed',
       updatedAt: new Date().toISOString(),
     },
   };
