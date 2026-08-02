@@ -57,9 +57,12 @@ const formatDate = (value) => {
   }).format(new Date(value));
 };
 
-const paymentStatusLabel = (value = 'partial_paid') => (
-  String(value).toLowerCase() === 'fully_paid' ? 'Fully Paid' : 'Partial Paid'
-);
+const paymentStatusLabel = (value = 'partial_paid') => {
+  const status = String(value).toLowerCase();
+  if (status === 'fully_paid') return 'Fully Paid';
+  if (status === 'unpaid') return 'Unpaid';
+  return 'Partial Paid';
+};
 
 const getTwifStoreDetails = (store) => STORE_DETAILS[normalizeStore(store)];
 
@@ -100,6 +103,7 @@ const createTwifInvoiceHtml = ({
   storeCreditApplied = 0,
   balanceDue,
   paymentStatus = 'partial_paid',
+  paymentMethod = 'transfer',
   trackingUrl,
   notes = [],
   validityText = 'This invoice is only valid for 48 hours.',
@@ -117,6 +121,7 @@ const createTwifInvoiceHtml = ({
   const safeInvoiceNumber = escapeHtml(invoiceNumber || 'INV00000');
   const storeLabel = escapeHtml(storeDetails.label);
   const safePaymentStatus = escapeHtml(paymentStatusLabel(paymentStatus));
+  const safePaymentMethod = escapeHtml(`${paymentMethod.charAt(0).toUpperCase()}${paymentMethod.slice(1)}`);
   const safeTrackingUrl = escapeHtml(trackingUrl || '#');
   const defaultNotes = [
     'Your order will be ready in 3–4 weeks from date of payment and measurements.',
@@ -179,6 +184,7 @@ const createTwifInvoiceHtml = ({
                     <div style="margin-top:10px;text-align:right;">
                       <span style="display:inline-block;border:1px solid #d9b45a;border-radius:999px;background:#fff9e8;color:#8a6419;padding:6px 12px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;">${safePaymentStatus}</span>
                     </div>
+                    <div style="margin-top:8px;color:#777;font-size:12px;font-weight:800;text-align:right;">Payment method: ${safePaymentMethod}</div>
                   </td>
                 </tr>
               </table>

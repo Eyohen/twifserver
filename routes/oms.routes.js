@@ -8,7 +8,7 @@ const { sendEmail } = require('../services/email.service');
 const cloudinaryService = require('../services/cloudinary.service');
 
 const router = express.Router();
-const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation } = db;
+const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest } = db;
 
 const notifyRoles = (roles, message, metadata = {}) => Promise.all(
   roles.map((recipientRole) => OmsNotification.create({
@@ -85,6 +85,9 @@ const inventoryCategories = new Set([
   'Jacket',
   'Trouser',
   'Native',
+  'Native Wear',
+  'Dress',
+  'Casual Wear',
   'Bridal',
   'Lining',
   'Trim',
@@ -115,9 +118,11 @@ const buildInvoiceHtmlPayload = (body = {}) => {
     storeCreditApplied: body.storeCreditApplied || 0,
     balanceDue: body.balanceDue,
     paymentStatus: body.paymentStatus || 'partial_paid',
+    paymentMethod: ['transfer', 'card', 'check', 'cash'].includes(body.paymentMethod) ? body.paymentMethod : 'transfer',
     trackingToken: token,
     trackingUrl: body.trackingUrl || trackingUrlForToken(token),
     notes: body.notes,
+    paymentEvidence: body.paymentEvidence || null,
   };
 };
 
@@ -126,7 +131,8 @@ const plainTextInvoice = (payload) => {
     `Invoice ${payload.invoiceNumber}`,
     `Store: ${getTwifStoreDetails(payload.store).label}`,
     `Customer: ${payload.customer?.name || payload.customer?.fullName || 'Customer'}`,
-    `Payment status: ${payload.paymentStatus === 'fully_paid' ? 'Fully Paid' : 'Partial Paid'}`,
+    `Payment status: ${payload.paymentStatus === 'fully_paid' ? 'Fully Paid' : payload.paymentStatus === 'unpaid' ? 'Unpaid' : 'Partial Paid'}`,
+    `Payment method: ${payload.paymentMethod.charAt(0).toUpperCase()}${payload.paymentMethod.slice(1)}`,
     `Balance due: ₦${Number(payload.balanceDue || 0).toLocaleString('en-NG')}`,
     '',
     'Items:',
@@ -141,7 +147,7 @@ const plainTextInvoice = (payload) => {
   return lines.filter(Boolean).join('\n');
 };
 
-const paymentStatusLabel = (status) => (status === 'fully_paid' ? 'Fully Paid' : 'Partial Paid');
+const paymentStatusLabel = (status) => status === 'fully_paid' ? 'Fully Paid' : status === 'unpaid' ? 'Unpaid' : 'Partial Paid';
 
 const customerTrackingStatus = (status) => {
   if (status === 'Ready' || status === 'Ready for Collection') return 'Ready for Collection';
@@ -165,6 +171,9 @@ const formatSentInvoice = (invoice) => {
     total: Number(invoice.total || 0),
     emailStatus: invoice.emailStatus === 'failed' ? 'Failed' : 'Sent',
     paymentStatus: paymentStatusLabel(invoice.paymentStatus),
+    paymentMethod: payload.paymentMethod
+      ? `${payload.paymentMethod.charAt(0).toUpperCase()}${payload.paymentMethod.slice(1)}`
+      : 'Transfer',
     orderStatus: invoice.orderStatus || paymentStatusLabel(invoice.paymentStatus),
     accountApprovalStatus: payload.accountApprovalStatus || 'Pending Accounts',
     item: firstItem?.description || '',
@@ -174,6 +183,7 @@ const formatSentInvoice = (invoice) => {
     trackingToken: payload.trackingToken || trackingTokenFromUrl(payload.trackingUrl),
     trackingUrl: payload.trackingUrl || (payload.trackingToken ? trackingUrlForToken(payload.trackingToken) : ''),
     orderSheet: payload.orderSheet || null,
+    paymentEvidence: payload.paymentEvidence || null,
   };
 };
 
@@ -456,7 +466,9 @@ router.get('/customers', asyncHandler(async (req, res) => {
       email: customer.email || '',
       category: customer.category || 'New',
       storeCreditBalance: Number(customer.storeCreditBalance || 0),
-      measurementsAdded: Boolean(customer.measurements && Object.keys(customer.measurements).length),
+      measurementsAdded: Boolean(customer.measurements && Object.keys(customer.measurements).some((key) => key !== 'profile')),
+      ...(customer.measurements?.profile || {}),
+      measurements: customer.measurements || {},
       createdAt: customer.createdAt,
       invoices: [],
     };
@@ -519,6 +531,39 @@ router.get('/customers', asyncHandler(async (req, res) => {
   }).sort((first, second) => new Date(second.lastOrderAt || second.createdAt) - new Date(first.lastOrderAt || first.createdAt));
 
   res.json({ success: true, data: { customers } });
+}));
+
+router.patch('/customers/:id', asyncHandler(async (req, res) => {
+  if (String(req.params.id).startsWith('sent-')) {
+    return res.status(409).json({ success: false, message: 'Create a customer profile before editing an invoice-only customer.' });
+  }
+  const customer = await Customer.findByPk(req.params.id);
+  if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+  const { fullName, phone, email, customerType, category, storeCreditBalance, ...profile } = req.body;
+  if (!String(fullName || '').trim() || !String(phone || '').trim()) {
+    return res.status(400).json({ success: false, message: 'Full name and phone number are required.' });
+  }
+  const existingMeasurements = customer.measurements || {};
+  await customer.update({
+    fullName: String(fullName).trim(),
+    phone: String(phone).trim(),
+    email: String(email || '').trim() || null,
+    category: customerType || category || customer.category,
+    storeCreditBalance: storeCreditBalance ?? customer.storeCreditBalance,
+    measurements: { ...existingMeasurements, profile },
+  });
+  await notifyRoles(['owner', 'admin'], `${customer.fullName}'s customer profile was updated.`, { event: 'customer_updated', customerId: customer.id });
+  res.json({ success: true, data: { customer } });
+}));
+
+router.delete('/customers/:id', asyncHandler(async (req, res) => {
+  if (String(req.params.id).startsWith('sent-')) return res.status(409).json({ success: false, message: 'Invoice-only customers cannot be archived.' });
+  const customer = await Customer.findByPk(req.params.id);
+  if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+  const measurements = customer.measurements || {};
+  await customer.update({ category: 'Archived', measurements: { ...measurements, profile: { ...(measurements.profile || {}), status: 'Archived' } } });
+  await notifyRoles(['owner', 'admin'], `${customer.fullName}'s customer profile was archived.`, { event: 'customer_archived', customerId: customer.id });
+  res.json({ success: true, data: { customer } });
 }));
 
 router.post('/invoices', asyncHandler(async (req, res) => {
@@ -640,7 +685,7 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     customerPhone: payload.customer.phone || null,
     createdByName: req.body.createdByName || 'Store Manager',
     total: Number(payload.balanceDue || 0),
-    paymentStatus: payload.paymentStatus === 'fully_paid' ? 'fully_paid' : 'partial_paid',
+    paymentStatus: ['unpaid', 'partial_paid', 'fully_paid'].includes(payload.paymentStatus) ? payload.paymentStatus : 'partial_paid',
     emailStatus: 'failed',
     orderStatus: paymentStatusLabel(payload.paymentStatus),
     payload: {
@@ -701,6 +746,9 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
 
 router.patch('/invoices/:invoiceNumber/account-approval', asyncHandler(async (req, res) => {
   const { status = 'Approved', note = '' } = req.body;
+  if (!['Approved', 'Flagged', 'Rejected'].includes(status)) {
+    return res.status(400).json({ success: false, message: 'Status must be Approved, Flagged, or Rejected.' });
+  }
   const invoice = await SentInvoice.findOne({
     where: { invoiceNumber: req.params.invoiceNumber },
   });
@@ -713,7 +761,7 @@ router.patch('/invoices/:invoiceNumber/account-approval', asyncHandler(async (re
   }
 
   const payload = invoice.payload || {};
-  const accountApprovalStatus = status === 'Flagged' ? 'Flagged' : 'Approved';
+  const accountApprovalStatus = status;
 
   await invoice.update({
     payload: {
@@ -795,6 +843,11 @@ router.get('/track/:token/profile', asyncHandler(async (req, res) => {
   }
 
   const invoices = await invoicesForCustomer(sourceInvoice);
+  const identity = normalizedCustomerIdentity(sourceInvoice);
+  const customerWhere = identity.phone
+    ? { phone: sourceInvoice.customerPhone }
+    : identity.email ? { email: sourceInvoice.customerEmail } : null;
+  const customerRecord = customerWhere ? await Customer.findOne({ where: customerWhere }) : null;
   const invoiceHistory = invoices.map((invoice) => {
     const payload = invoice.payload || {};
     const items = Array.isArray(payload.items) ? payload.items : [];
@@ -807,6 +860,10 @@ router.get('/track/:token/profile', asyncHandler(async (req, res) => {
       balanceDue: Number(payload.balanceDue || 0),
       paymentStatus: paymentStatusLabel(invoice.paymentStatus),
       orderStatus: customerTrackingStatus(payload.orderSheet?.status || invoice.orderStatus),
+      deliveryDate: payload.orderSheet?.delivery || payload.dueDate || null,
+      tailor: payload.orderSheet?.tailor || 'To be assigned',
+      fabric: payload.orderSheet?.fabric || 'To be confirmed',
+      styleImages: Array.isArray(payload.orderSheet?.styleImages) ? payload.orderSheet.styleImages : [],
       items: items.map((item) => ({
         description: item.description || item.name || 'Custom order',
         quantity: Number(item.quantity || 1),
@@ -824,6 +881,9 @@ router.get('/track/:token/profile', asyncHandler(async (req, res) => {
         totalOrders: invoiceHistory.length,
         totalSpend: invoiceHistory.reduce((sum, invoice) => sum + invoice.total, 0),
         invoices: invoiceHistory,
+        measurements: customerRecord?.measurements || sourceInvoice.payload?.orderSheet?.measurements || {},
+        customerDetails: customerRecord?.measurements?.profile || {},
+        storeCreditBalance: Number(customerRecord?.storeCreditBalance || 0),
       },
     },
   });
@@ -862,7 +922,7 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
   });
 
   await notifyRoles(
-    ['accounts'],
+    ['owner', 'admin', 'accounts'],
     `${invoice.invoiceNumber} has a new order sheet and is waiting for Accounts approval.`,
     { invoiceNumber: invoice.invoiceNumber, event: 'order_sheet_created' }
   );
@@ -1037,6 +1097,54 @@ router.post('/fabrics', asyncHandler(async (req, res) => {
 router.get('/fabrics', asyncHandler(async (req, res) => {
   const fabrics = await Fabric.findAll({ order: [['name', 'ASC']] });
   res.json({ success: true, data: { fabrics } });
+}));
+
+router.post('/fabrics/:id/edit-requests', asyncHandler(async (req, res) => {
+  const fabric = await Fabric.findByPk(req.params.id);
+  if (!fabric) return res.status(404).json({ success: false, message: 'Inventory item not found' });
+  const { proposedChanges = {}, reason, requestedBy = 'Inventory Manager', requestedByRole = 'inventory_manager' } = req.body;
+  if (requestedByRole !== 'inventory_manager') return res.status(403).json({ success: false, message: 'Only the Inventory Manager can submit inventory edit requests.' });
+  if (!String(reason || '').trim()) return res.status(400).json({ success: false, message: 'A reason for the requested edit is required.' });
+  const allowed = ['name', 'type', 'unit', 'supplier', 'quantity', 'lowStockThreshold'];
+  const changes = Object.fromEntries(Object.entries(proposedChanges).filter(([key]) => allowed.includes(key)));
+  if (Object.prototype.hasOwnProperty.call(changes, 'quantity')) {
+    changes.quantity = Number(changes.quantity);
+    if (!Number.isFinite(changes.quantity) || changes.quantity < 0) return res.status(400).json({ success: false, message: 'Quantity must be a valid non-negative number.' });
+  }
+  if (Object.prototype.hasOwnProperty.call(changes, 'lowStockThreshold')) {
+    changes.lowStockThreshold = Number(changes.lowStockThreshold);
+    if (!Number.isFinite(changes.lowStockThreshold) || changes.lowStockThreshold < 0) return res.status(400).json({ success: false, message: 'Low-stock threshold must be a valid non-negative number.' });
+  }
+  if (!Object.keys(changes).length) return res.status(400).json({ success: false, message: 'At least one proposed change is required.' });
+  const request = await InventoryEditRequest.create({ fabricId: fabric.id, requestedBy, requestedByRole, proposedChanges: changes, reason: String(reason).trim() });
+  await notifyRoles(['owner', 'admin', 'accounts'], `${requestedBy} requested changes to inventory item ${fabric.name}. Owner approval is required.`, { event: 'inventory_edit_requested', requestId: request.id, fabricId: fabric.id });
+  return res.status(201).json({ success: true, data: { request } });
+}));
+
+router.get('/inventory-edit-requests', asyncHandler(async (req, res) => {
+  const where = req.query.status ? { status: req.query.status } : {};
+  const requests = await InventoryEditRequest.findAll({ where, order: [['createdAt', 'DESC']] });
+  const fabrics = await Fabric.findAll({ where: { id: requests.map((request) => request.fabricId) } });
+  const byId = new Map(fabrics.map((fabric) => [fabric.id, fabric]));
+  res.json({ success: true, data: { requests: requests.map((request) => ({ ...request.toJSON(), fabric: byId.get(request.fabricId) || null })) } });
+}));
+
+router.patch('/inventory-edit-requests/:id/review', asyncHandler(async (req, res) => {
+  const { decision, ownerPhone, ownerPin, reviewNote = '' } = req.body;
+  const owner = await verifiedStaffForProfile(String(ownerPhone || ''), String(ownerPin || ''));
+  if (!owner || owner.role !== 'owner') return res.status(403).json({ success: false, message: 'Only a verified Owner can approve or reject inventory edits.' });
+  if (!['Approved', 'Rejected'].includes(decision)) return res.status(400).json({ success: false, message: 'Decision must be Approved or Rejected.' });
+  const request = await InventoryEditRequest.findByPk(req.params.id);
+  if (!request) return res.status(404).json({ success: false, message: 'Inventory edit request not found.' });
+  if (request.status !== 'Pending Owner Approval') return res.status(409).json({ success: false, message: 'This request has already been reviewed.' });
+  const fabric = await Fabric.findByPk(request.fabricId);
+  if (!fabric) return res.status(404).json({ success: false, message: 'Inventory item not found.' });
+  await db.sequelize.transaction(async (transaction) => {
+    if (decision === 'Approved') await fabric.update(request.proposedChanges, { transaction });
+    await request.update({ status: decision, reviewedBy: owner.displayName, reviewedAt: new Date(), reviewNote }, { transaction });
+  });
+  await notifyRoles(['inventory_manager', 'admin', 'accounts'], `Inventory edit request for ${fabric.name} was ${decision.toLowerCase()} by ${owner.displayName}.`, { event: `inventory_edit_${decision.toLowerCase()}`, requestId: request.id, fabricId: fabric.id });
+  res.json({ success: true, data: { request, fabric } });
 }));
 
 router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
@@ -1235,6 +1343,9 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
           store: invoice.store === 'lekki' ? 'Lekki' : 'Ikeja',
           total: Number(invoice.total || 0),
           paymentStatus: paymentStatusLabel(invoice.paymentStatus),
+          paymentMethod: invoice.payload?.paymentMethod
+            ? `${invoice.payload.paymentMethod.charAt(0).toUpperCase()}${invoice.payload.paymentMethod.slice(1)}`
+            : 'Transfer',
           approvalStatus: invoice.payload?.accountApprovalStatus || 'Pending Accounts',
           orderStatus: invoice.payload?.orderSheet?.status || invoice.orderStatus,
         })),

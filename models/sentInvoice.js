@@ -39,7 +39,7 @@ module.exports = (sequelize, DataTypes) => {
       defaultValue: 0,
     },
     paymentStatus: {
-      type: DataTypes.ENUM('partial_paid', 'fully_paid'),
+      type: DataTypes.ENUM('unpaid', 'partial_paid', 'fully_paid'),
       allowNull: false,
       defaultValue: 'partial_paid',
     },

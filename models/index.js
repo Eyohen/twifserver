@@ -14,6 +14,7 @@ const activeModelFiles = [
   'fabric.js',
   'omsNotification.js',
   'inventoryAllocation.js',
+  'inventoryEditRequest.js',
   'sentInvoice.js',
   'admin.js',
   'user.js',
