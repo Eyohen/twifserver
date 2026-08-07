@@ -10,10 +10,30 @@ const cloudinaryService = require('../services/cloudinary.service');
 const router = express.Router();
 const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest } = db;
 
+// The channel drives the category filter in the notification inbox, so it is
+// derived from the event rather than hardcoded.
+const CHANNEL_BY_EVENT = {
+  invoice_created: 'Invoices',
+  account_approval: 'Invoices',
+  order_sheet_created: 'Orders',
+  order_sheet_released: 'Orders',
+  tailor_assigned: 'Production',
+  order_ready: 'Production',
+  production_ready: 'Production',
+  inventory_created: 'Inventory',
+  inventory_edit_requested: 'Inventory',
+  inventory_edit_approved: 'Inventory',
+  inventory_edit_rejected: 'Inventory',
+  fabric_allocated: 'Inventory',
+  low_stock: 'Inventory',
+  customer_updated: 'System',
+  customer_archived: 'System',
+};
+
 const notifyRoles = (roles, message, metadata = {}) => Promise.all(
   roles.map((recipientRole) => OmsNotification.create({
     recipientRole,
-    channel: 'Inventory',
+    channel: CHANNEL_BY_EVENT[metadata.event] || 'System',
     message,
     metadata,
   }))
@@ -184,6 +204,21 @@ const formatSentInvoice = (invoice) => {
     trackingUrl: payload.trackingUrl || (payload.trackingToken ? trackingUrlForToken(payload.trackingToken) : ''),
     orderSheet: payload.orderSheet || null,
     paymentEvidence: payload.paymentEvidence || null,
+    // The full document fields, so an invoice can be re-rendered as a PDF or
+    // resent from a list without first reopening the create screen.
+    email: invoice.customerEmail || '',
+    phone: invoice.customerPhone || '',
+    items: Array.isArray(payload.items) ? payload.items : [],
+    subtotal: Number(payload.subtotal || 0),
+    eliteDiscountAmount: Number(payload.eliteDiscountAmount || 0),
+    storeCreditApplied: Number(payload.storeCreditApplied || 0),
+    balanceDue: Number(payload.balanceDue ?? invoice.total ?? 0),
+    invoiceDate: payload.invoiceDate || invoice.createdAt,
+    dueDate: payload.dueDate || '',
+    notes: payload.notes || '',
+    storeKey: invoice.store,
+    paymentMethodKey: payload.paymentMethod || 'transfer',
+    paymentStatusKey: invoice.paymentStatus,
   };
 };
 
