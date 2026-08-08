@@ -572,7 +572,9 @@ router.get('/customers', asyncHandler(async (req, res) => {
       // Notes, date of birth, occupation, address and the rest of the editable
       // profile are stored under measurements.profile. They were saved but
       // never returned, so every edit looked like it had been lost on reload.
-      ...(profile.measurements?.profile || {}),
+      // `measurements` is stripped from the spread because body measurements
+      // live at the top level; an early build nested a copy in here too.
+      ...(({ measurements: _nested, ...rest }) => rest)(profile.measurements?.profile || {}),
       id: profile.id,
       fullName: profile.fullName,
       phone: profile.phone,
@@ -580,6 +582,10 @@ router.get('/customers', asyncHandler(async (req, res) => {
       category: profile.category === 'New' && profile.invoices.length > 1 ? 'Returning' : profile.category,
       storeCreditBalance: profile.storeCreditBalance,
       measurementsAdded: profile.measurementsAdded,
+      // Body measurements, without the profile block they sit beside.
+      measurements: Object.fromEntries(
+        Object.entries(profile.measurements || {}).filter(([key]) => key !== 'profile')
+      ),
       totalOrders: profile.invoices.length,
       confirmedOrders: profile.invoices.filter((invoice) => Boolean(invoice.payload?.orderSheet)).length,
       twelveMonthSpend: recentInvoices.reduce((sum, invoice) => sum + Number(invoice.total || 0), 0),
@@ -599,18 +605,36 @@ router.patch('/customers/:id', asyncHandler(async (req, res) => {
   }
   const customer = await Customer.findByPk(req.params.id);
   if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
-  const { fullName, phone, email, customerType, category, storeCreditBalance, ...profile } = req.body;
+  const {
+    fullName, phone, email, customerType, category, storeCreditBalance,
+    measurements: bodyMeasurements, ...profile
+  } = req.body;
   if (!String(fullName || '').trim() || !String(phone || '').trim()) {
     return res.status(400).json({ success: false, message: 'Full name and phone number are required.' });
   }
+
   const existingMeasurements = customer.measurements || {};
+
+  // Body measurements are stored at the top level, beside the profile block,
+  // and blanks are dropped — an empty string is not a measurement, and keeping
+  // them made "has measurements" true for a customer nobody had measured.
+  const takenMeasurements = bodyMeasurements && typeof bodyMeasurements === 'object'
+    ? Object.fromEntries(Object.entries(bodyMeasurements).filter(([, value]) => String(value ?? '').trim()))
+    : null;
+
   await customer.update({
     fullName: String(fullName).trim(),
     phone: String(phone).trim(),
     email: String(email || '').trim() || null,
     category: customerType || category || customer.category,
     storeCreditBalance: storeCreditBalance ?? customer.storeCreditBalance,
-    measurements: { ...existingMeasurements, profile },
+    measurements: {
+      ...existingMeasurements,
+      ...(takenMeasurements || {}),
+      // Merged, not replaced: a partial save — notes on their own, say — was
+      // wiping every other profile field the customer had.
+      profile: { ...(existingMeasurements.profile || {}), ...profile },
+    },
   });
   await notifyRoles(['owner', 'admin'], `${customer.fullName}'s customer profile was updated.`, { event: 'customer_updated', customerId: customer.id });
   res.json({ success: true, data: { customer } });
