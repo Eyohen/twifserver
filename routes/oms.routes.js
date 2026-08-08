@@ -548,6 +548,10 @@ router.get('/customers', asyncHandler(async (req, res) => {
     const recentInvoices = profile.invoices.filter((invoice) => new Date(invoice.createdAt) >= twelveMonthsAgo);
     const lastInvoice = profile.invoices[0];
     return {
+      // Notes, date of birth, occupation, address and the rest of the editable
+      // profile are stored under measurements.profile. They were saved but
+      // never returned, so every edit looked like it had been lost on reload.
+      ...(profile.measurements?.profile || {}),
       id: profile.id,
       fullName: profile.fullName,
       phone: profile.phone,
