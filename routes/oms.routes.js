@@ -30,12 +30,33 @@ const CHANNEL_BY_EVENT = {
   customer_archived: 'System',
 };
 
+// A short headline per event. Without one the inbox fell back to slicing the
+// message at its first full stop, which produced a title identical to the
+// message on every row.
+const TITLE_BY_EVENT = {
+  invoice_created: 'Invoice awaiting Accounts review',
+  account_approval: 'Accounts reviewed an invoice',
+  order_sheet_created: 'Order sheet submitted',
+  order_sheet_released: 'Order sheet released to Production',
+  tailor_assigned: 'Job assigned to a tailor',
+  order_ready: 'Order marked ready',
+  production_ready: 'Approved and ready for Production',
+  inventory_created: 'New stock received',
+  inventory_edit_requested: 'Inventory edit needs approval',
+  inventory_edit_approved: 'Inventory edit approved',
+  inventory_edit_rejected: 'Inventory edit rejected',
+  fabric_allocated: 'Fabric allocated to a job',
+  low_stock: 'Low stock threshold reached',
+  customer_updated: 'Customer profile updated',
+  customer_archived: 'Customer profile archived',
+};
+
 const notifyRoles = (roles, message, metadata = {}) => Promise.all(
   roles.map((recipientRole) => OmsNotification.create({
     recipientRole,
     channel: CHANNEL_BY_EVENT[metadata.event] || 'System',
     message,
-    metadata,
+    metadata: { title: TITLE_BY_EVENT[metadata.event] || 'Notification', ...metadata },
   }))
 );
 
@@ -817,8 +838,12 @@ router.patch('/invoices/:invoiceNumber/account-approval', asyncHandler(async (re
 
   await notifyRoles(
     ['store_manager'],
-    `${invoice.invoiceNumber} was ${accountApprovalStatus.toLowerCase()} by Accounts.`,
-    { invoiceNumber: invoice.invoiceNumber, event: 'account_approval' }
+    `${invoice.invoiceNumber} for ${invoice.customerName} was ${accountApprovalStatus.toLowerCase()} by Accounts.`,
+    {
+      invoiceNumber: invoice.invoiceNumber,
+      event: 'account_approval',
+      title: `Invoice ${accountApprovalStatus.toLowerCase()} by Accounts`,
+    }
   );
   if (accountApprovalStatus === 'Approved' && payload.orderSheet) {
     await notifyRoles(
