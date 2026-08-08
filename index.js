@@ -171,6 +171,19 @@ const startServer = async () => {
     if (process.env.NODE_ENV === 'development') {
       await db.sequelize.sync({ alter: true });
       console.log('Database models synced');
+    } else if (process.env.SKIP_SCHEMA_CHECK !== 'true') {
+      // Deploys run `node index.js`, not the migrations, and production has no
+      // SequelizeMeta table — so a model added to the repo never reaches the
+      // database and its routes fail at runtime. A plain sync() issues
+      // CREATE TABLE IF NOT EXISTS: it adds what is missing and never alters
+      // or drops an existing table, so live data is untouched.
+      const before = await db.sequelize.getQueryInterface().showAllTables();
+      await db.sequelize.sync();
+      const after = await db.sequelize.getQueryInterface().showAllTables();
+      const created = after.filter((table) => !before.includes(table));
+      console.log(created.length
+        ? `Schema check created missing tables: ${created.join(', ')}`
+        : 'Schema check: no missing tables');
     }
 
     app.listen(PORT, () => {

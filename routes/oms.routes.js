@@ -1341,6 +1341,194 @@ router.get('/fabrics/allocations', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { allocations } });
 }));
 
+
+// ── SETTINGS AND MEMBERSHIP TIERS ─────────────────────────────────────────
+// Both live as JSON rows in PlatformSettings rather than tables of their own,
+// so they need no migration to reach an environment.
+
+const SETTINGS_KEY = 'oms.settings';
+const TIERS_KEY = 'oms.membership_tiers';
+
+const DEFAULT_SETTINGS = {
+  businessName: 'The Way It Fits',
+  supportEmail: '',
+  supportPhone: '',
+  invoicePrefix: 'INV',
+  invoiceValidityHours: 48,
+  productionLeadTimeWeeks: 4,
+  collectionReminderDays: 7,
+  lowStockThreshold: 5,
+  currency: 'NGN',
+  requirePaymentEvidence: true,
+  notifyOnLowStock: true,
+  notifyOnNewInvoice: true,
+};
+
+// Elite is the tier the invoice discount reads from; the rest describe where a
+// customer sits. Discounts are percentages of the invoice subtotal.
+const DEFAULT_TIERS = [
+  { id: 'new', name: 'New', discountPercent: 0, colour: '#8a7a6a', description: 'Created manually, no confirmed orders yet.', minSpend: 0, minOrders: 0, minMonths: 0, isDefault: true },
+  { id: 'active', name: 'Active', discountPercent: 0, colour: '#2a7d4f', description: 'Has ordered within the last 12 months.', minSpend: 0, minOrders: 1, minMonths: 0, isDefault: true },
+  { id: 'non-active', name: 'Non-Active', discountPercent: 0, colour: '#8a3520', description: 'No confirmed orders in the last 12 months.', minSpend: 0, minOrders: 0, minMonths: 12, isDefault: true },
+  { id: 'elite', name: 'Elite Member', discountPercent: 5, colour: '#c97b08', description: 'Automatic discount on every invoice.', minSpend: 3000000, minOrders: 12, minMonths: 12, isDefault: true },
+];
+
+const readSetting = async (key, fallback) => {
+  const row = await db.PlatformSettings.findOne({ where: { key } });
+  if (!row) return fallback;
+  try {
+    return JSON.parse(row.value);
+  } catch {
+    return fallback;
+  }
+};
+
+const writeSetting = async (key, value, category) => {
+  const [row, created] = await db.PlatformSettings.findOrCreate({
+    where: { key },
+    defaults: { key, value: JSON.stringify(value), dataType: 'json', category },
+  });
+  if (!created) await row.update({ value: JSON.stringify(value), dataType: 'json', category });
+  return value;
+};
+
+const slugForTier = (name) => String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+
+router.get('/settings', asyncHandler(async (req, res) => {
+  const stored = await readSetting(SETTINGS_KEY, {});
+  res.json({ success: true, data: { settings: { ...DEFAULT_SETTINGS, ...stored } } });
+}));
+
+router.put('/settings', asyncHandler(async (req, res) => {
+  const incoming = req.body || {};
+  // Only known keys are stored, so the settings row cannot become a dumping
+  // ground for whatever a client happens to post.
+  const next = Object.fromEntries(Object.keys(DEFAULT_SETTINGS)
+    .filter((key) => Object.prototype.hasOwnProperty.call(incoming, key))
+    .map((key) => {
+      const fallback = DEFAULT_SETTINGS[key];
+      const value = incoming[key];
+      if (typeof fallback === 'number') return [key, Number.isFinite(Number(value)) ? Number(value) : fallback];
+      if (typeof fallback === 'boolean') return [key, Boolean(value)];
+      return [key, String(value ?? '').trim()];
+    }));
+
+  const current = await readSetting(SETTINGS_KEY, {});
+  const settings = { ...DEFAULT_SETTINGS, ...current, ...next };
+  await writeSetting(SETTINGS_KEY, settings, 'oms');
+  res.json({ success: true, data: { settings } });
+}));
+
+router.get('/membership-tiers', asyncHandler(async (req, res) => {
+  const tiers = await readSetting(TIERS_KEY, DEFAULT_TIERS);
+  const customers = await Customer.findAll({ order: [['createdAt', 'DESC']] });
+
+  // Customers are counted against the tier their category names, so the page
+  // shows who is actually on each tier rather than a static number.
+  const withCounts = tiers.map((tier) => {
+    const members = customers.filter((customer) => slugForTier(customer.category || 'New') === tier.id);
+    return {
+      ...tier,
+      memberCount: members.length,
+      members: members.slice(0, 50).map((customer) => ({
+        id: customer.id,
+        fullName: customer.fullName,
+        phone: customer.phone,
+        email: customer.email,
+        storeCreditBalance: Number(customer.storeCreditBalance || 0),
+        createdAt: customer.createdAt,
+      })),
+    };
+  });
+
+  const known = new Set(tiers.map((tier) => tier.id));
+  const unassigned = customers.filter((customer) => !known.has(slugForTier(customer.category || 'New')));
+
+  res.json({ success: true, data: { tiers: withCounts, unassignedCount: unassigned.length } });
+}));
+
+router.post('/membership-tiers', asyncHandler(async (req, res) => {
+  const { name, discountPercent = 0, colour = '#8a7a6a', description = '', minSpend = 0, minOrders = 0, minMonths = 0 } = req.body || {};
+  if (!String(name || '').trim()) return res.status(400).json({ success: false, message: 'A membership name is required.' });
+
+  const discount = Number(discountPercent);
+  if (!Number.isFinite(discount) || discount < 0 || discount > 100) {
+    return res.status(400).json({ success: false, message: 'Discount must be between 0 and 100.' });
+  }
+
+  const tiers = await readSetting(TIERS_KEY, DEFAULT_TIERS);
+  const id = slugForTier(name);
+  if (!id) return res.status(400).json({ success: false, message: 'That membership name cannot be used.' });
+  if (tiers.some((tier) => tier.id === id)) {
+    return res.status(409).json({ success: false, message: 'A membership with that name already exists.' });
+  }
+
+  const tier = {
+    id,
+    name: String(name).trim(),
+    discountPercent: discount,
+    colour,
+    description: String(description || '').trim(),
+    minSpend: Number(minSpend) || 0,
+    minOrders: Number(minOrders) || 0,
+    minMonths: Number(minMonths) || 0,
+    isDefault: false,
+  };
+  await writeSetting(TIERS_KEY, [...tiers, tier], 'oms');
+  await notifyRoles(['owner', 'admin'], `A new membership "${tier.name}" was created at ${tier.discountPercent}% discount.`, { event: 'membership_created', tierId: tier.id });
+  res.status(201).json({ success: true, data: { tier } });
+}));
+
+router.patch('/membership-tiers/:id', asyncHandler(async (req, res) => {
+  const tiers = await readSetting(TIERS_KEY, DEFAULT_TIERS);
+  const index = tiers.findIndex((tier) => tier.id === req.params.id);
+  if (index === -1) return res.status(404).json({ success: false, message: 'Membership not found.' });
+
+  const { name, discountPercent, colour, description, minSpend, minOrders, minMonths } = req.body || {};
+  if (discountPercent !== undefined) {
+    const discount = Number(discountPercent);
+    if (!Number.isFinite(discount) || discount < 0 || discount > 100) {
+      return res.status(400).json({ success: false, message: 'Discount must be between 0 and 100.' });
+    }
+  }
+
+  const existing = tiers[index];
+  const updated = {
+    ...existing,
+    // The id is the link to a customer's category, so renaming a built-in
+    // membership must not move every customer off it.
+    name: name !== undefined && String(name).trim() ? String(name).trim() : existing.name,
+    discountPercent: discountPercent !== undefined ? Number(discountPercent) : existing.discountPercent,
+    colour: colour ?? existing.colour,
+    description: description !== undefined ? String(description).trim() : existing.description,
+    minSpend: minSpend !== undefined ? Number(minSpend) || 0 : existing.minSpend,
+    minOrders: minOrders !== undefined ? Number(minOrders) || 0 : existing.minOrders,
+    minMonths: minMonths !== undefined ? Number(minMonths) || 0 : existing.minMonths,
+  };
+
+  const next = [...tiers];
+  next[index] = updated;
+  await writeSetting(TIERS_KEY, next, 'oms');
+  res.json({ success: true, data: { tier: updated } });
+}));
+
+router.delete('/membership-tiers/:id', asyncHandler(async (req, res) => {
+  const tiers = await readSetting(TIERS_KEY, DEFAULT_TIERS);
+  const tier = tiers.find((item) => item.id === req.params.id);
+  if (!tier) return res.status(404).json({ success: false, message: 'Membership not found.' });
+  if (tier.isDefault) {
+    return res.status(409).json({ success: false, message: 'The built-in memberships cannot be deleted. Edit them instead.' });
+  }
+
+  const inUse = await Customer.count({ where: { category: tier.name } });
+  if (inUse) {
+    return res.status(409).json({ success: false, message: `${inUse} customer${inUse === 1 ? ' is' : 's are'} on this membership. Move them first.` });
+  }
+
+  await writeSetting(TIERS_KEY, tiers.filter((item) => item.id !== tier.id), 'oms');
+  res.json({ success: true, message: 'Membership deleted.' });
+}));
+
 router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
   const endDate = req.query.to ? new Date(`${req.query.to}T23:59:59.999Z`) : new Date();
   const startDate = req.query.from
