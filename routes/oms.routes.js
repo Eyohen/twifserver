@@ -120,22 +120,22 @@ const trackingBaseUrl = () => (
 
 const trackingToken = () => crypto.randomBytes(8).toString('hex');
 
-const inventoryCategories = new Set([
-  'Suiting',
-  'Shirting',
-  'Jacket',
-  'Trouser',
-  'Native',
-  'Native Wear',
-  'Dress',
-  'Casual Wear',
-  'Bridal',
-  'Lining',
-  'Trim',
+// The inventory types the shop actually buys. They used to be a fixed list of
+// garment names — Suiting, Bridal, Trouser — which described what a fabric was
+// for rather than what was on the shelf, and could not be added to without a
+// deploy. The list now lives in PlatformSettings and is editable from the app.
+const INVENTORY_TYPES_KEY = 'oms.inventoryTypes';
+const DEFAULT_INVENTORY_TYPES = [
+  'Fabric',
+  'Linings',
+  'Packaging Materials',
+  'Buttons',
+  'Sewing Material',
   'Accessories',
-  'Cloth',
-  'Add Ons',
-]);
+];
+
+// Cloth is measured out, everything else is counted.
+const INVENTORY_UNITS = ['yards', 'units'];
 
 const trackingTokenFromUrl = (value = '') => {
   const match = String(value).match(/\/c\/([^/?#]+)/);
@@ -1141,10 +1141,51 @@ router.get('/orders', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { orders } });
 }));
 
+router.get('/inventory-types', asyncHandler(async (req, res) => {
+  const types = await readSetting(INVENTORY_TYPES_KEY, DEFAULT_INVENTORY_TYPES);
+  res.json({ success: true, data: { types, units: INVENTORY_UNITS } });
+}));
+
+router.post('/inventory-types', asyncHandler(async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  if (!name) return res.status(400).json({ success: false, message: 'A name is required' });
+
+  const types = await readSetting(INVENTORY_TYPES_KEY, DEFAULT_INVENTORY_TYPES);
+  if (types.some((type) => type.toLowerCase() === name.toLowerCase())) {
+    return res.status(409).json({ success: false, message: `${name} is already an inventory type` });
+  }
+
+  const next = [...types, name];
+  await writeSetting(INVENTORY_TYPES_KEY, next, 'oms');
+  res.status(201).json({ success: true, data: { types: next, units: INVENTORY_UNITS } });
+}));
+
+router.delete('/inventory-types/:name', asyncHandler(async (req, res) => {
+  const name = decodeURIComponent(req.params.name);
+  const types = await readSetting(INVENTORY_TYPES_KEY, DEFAULT_INVENTORY_TYPES);
+
+  // Removing a type that items are filed under would leave those items
+  // pointing at something that no longer exists.
+  const inUse = await Fabric.count({ where: { type: name } });
+  if (inUse) {
+    return res.status(409).json({
+      success: false,
+      message: inUse === 1
+        ? `1 item still uses ${name}. Move it to another type first.`
+        : `${inUse} items still use ${name}. Move them to another type first.`,
+    });
+  }
+
+  const next = types.filter((type) => type !== name);
+  await writeSetting(INVENTORY_TYPES_KEY, next, 'oms');
+  res.json({ success: true, data: { types: next, units: INVENTORY_UNITS } });
+}));
+
 router.post('/fabrics', asyncHandler(async (req, res) => {
-  const { name, type, quantity = 0, unit = 'm', supplier, lowStockThreshold = 0 } = req.body;
+  const { sku, name, type, colour, quantity = 0, unit = 'units', cost, location, supplier, lowStockThreshold = 0, image } = req.body;
   const numericQuantity = Number(quantity);
   const numericThreshold = Number(lowStockThreshold);
+  const numericCost = cost === undefined || cost === null || cost === '' ? null : Number(cost);
 
   if (!String(name || '').trim() || !String(type || '').trim() || !String(unit || '').trim()) {
     return res.status(400).json({
@@ -1152,10 +1193,18 @@ router.post('/fabrics', asyncHandler(async (req, res) => {
       message: 'name, type, and unit are required',
     });
   }
-  if (!inventoryCategories.has(String(type).trim())) {
+
+  const types = await readSetting(INVENTORY_TYPES_KEY, DEFAULT_INVENTORY_TYPES);
+  if (!types.includes(String(type).trim())) {
     return res.status(400).json({
       success: false,
-      message: 'Please select a valid inventory category',
+      message: 'Please select a valid inventory type',
+    });
+  }
+  if (!INVENTORY_UNITS.includes(String(unit).trim())) {
+    return res.status(400).json({
+      success: false,
+      message: `Unit must be one of: ${INVENTORY_UNITS.join(', ')}`,
     });
   }
   if (!Number.isFinite(numericQuantity) || !Number.isFinite(numericThreshold)
@@ -1165,14 +1214,30 @@ router.post('/fabrics', asyncHandler(async (req, res) => {
       message: 'Quantity and low-stock threshold must be valid non-negative numbers',
     });
   }
+  if (numericCost !== null && (!Number.isFinite(numericCost) || numericCost < 0)) {
+    return res.status(400).json({ success: false, message: 'Cost must be a valid non-negative number' });
+  }
+
+  const trimmedSku = String(sku || '').trim();
+  if (trimmedSku) {
+    const clash = await Fabric.findOne({ where: { sku: trimmedSku } });
+    if (clash) {
+      return res.status(409).json({ success: false, message: `SKU ${trimmedSku} is already used by ${clash.name}` });
+    }
+  }
 
   const fabric = await Fabric.create({
+    sku: trimmedSku || null,
     name: String(name).trim(),
     type: String(type).trim(),
+    colour: String(colour || '').trim() || null,
     quantity: numericQuantity,
     unit: String(unit).trim(),
+    cost: numericCost,
+    location: String(location || '').trim() || null,
     supplier: String(supplier || '').trim() || null,
     lowStockThreshold: numericThreshold,
+    image: typeof image === 'string' && image.startsWith('data:') ? image : null,
   });
   await notifyRoles(
     ['accounts'],
@@ -1182,9 +1247,48 @@ router.post('/fabrics', asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, data: { fabric } });
 }));
 
+// Item photos are data URLs measured in hundreds of kilobytes, so they are left
+// out of the list and fetched one at a time from the endpoint below — otherwise
+// opening the inventory page would download every photo in the shop at once.
+const FABRIC_LIST_ATTRIBUTES = {
+  exclude: ['image'],
+  include: [[db.sequelize.literal('CASE WHEN "image" IS NOT NULL THEN true ELSE false END'), 'hasImage']],
+};
+
 router.get('/fabrics', asyncHandler(async (req, res) => {
-  const fabrics = await Fabric.findAll({ order: [['name', 'ASC']] });
+  const fabrics = await Fabric.findAll({ attributes: FABRIC_LIST_ATTRIBUTES, order: [['name', 'ASC']] });
   res.json({ success: true, data: { fabrics } });
+}));
+
+// `/fabrics/allocations` is a list, not an item id, and it is declared further
+// down the file — so anything that is not an id is handed straight on rather
+// than being swallowed here.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const onlyItemIds = (req, res, next) => (UUID_PATTERN.test(req.params.id) ? next() : next('route'));
+
+router.get('/fabrics/:id', onlyItemIds, asyncHandler(async (req, res) => {
+  const fabric = await Fabric.findByPk(req.params.id, { attributes: FABRIC_LIST_ATTRIBUTES });
+  if (!fabric) return res.status(404).json({ success: false, message: 'Inventory item not found' });
+
+  // What this item has been used on, so the detail page can show its movement
+  // rather than just its current count.
+  const allocations = await db.InventoryAllocation.findAll({
+    where: { fabricId: fabric.id },
+    order: [['createdAt', 'DESC']],
+    limit: 25,
+  });
+
+  res.json({ success: true, data: { fabric, allocations } });
+}));
+
+router.get('/fabrics/:id/image', asyncHandler(async (req, res) => {
+  const fabric = await Fabric.findByPk(req.params.id, { attributes: ['id', 'image', 'updatedAt'] });
+  const match = /^data:([^;,]+);base64,(.+)$/.exec(fabric?.image || '');
+  if (!match) return res.status(404).json({ success: false, message: 'No image for this item' });
+
+  res.set('Content-Type', match[1]);
+  res.set('Cache-Control', 'private, max-age=300');
+  res.send(Buffer.from(match[2], 'base64'));
 }));
 
 router.post('/fabrics/:id/edit-requests', asyncHandler(async (req, res) => {
@@ -1639,8 +1743,64 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
   });
 }));
 
+// Quantity still cannot be edited here: stock moves through allocation, or
+// through an edit request the Owner approves. Everything else on an item is a
+// description of it — a mistyped SKU or a shelf that has been moved — and had
+// no way of being corrected at all.
+const EDITABLE_FABRIC_FIELDS = ['sku', 'name', 'colour', 'cost', 'location', 'supplier', 'lowStockThreshold', 'image'];
+
 router.patch('/fabrics/:id', asyncHandler(async (req, res) => {
-  res.status(403).json({ success: false, message: 'Inventory records cannot be edited. Stock changes must come from production allocation.' });
+  const body = req.body || {};
+  if (body.quantity !== undefined) {
+    return res.status(403).json({
+      success: false,
+      message: 'Quantity cannot be edited directly. Raise a stock edit request or allocate through production.',
+    });
+  }
+
+  const fabric = await Fabric.findByPk(req.params.id);
+  if (!fabric) return res.status(404).json({ success: false, message: 'Inventory item not found' });
+
+  const changes = {};
+  for (const field of EDITABLE_FABRIC_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(body, field)) continue;
+    const raw = body[field];
+
+    if (field === 'cost' || field === 'lowStockThreshold') {
+      if (raw === '' || raw === null) {
+        if (field === 'cost') changes.cost = null;
+        continue;
+      }
+      const numeric = Number(raw);
+      if (!Number.isFinite(numeric) || numeric < 0) {
+        return res.status(400).json({ success: false, message: `${field} must be a valid non-negative number` });
+      }
+      changes[field] = numeric;
+      continue;
+    }
+
+    if (field === 'image') {
+      changes.image = typeof raw === 'string' && raw.startsWith('data:') ? raw : null;
+      continue;
+    }
+
+    const trimmed = String(raw ?? '').trim();
+    if (field === 'name' && !trimmed) {
+      return res.status(400).json({ success: false, message: 'Name cannot be empty' });
+    }
+    changes[field] = trimmed || (field === 'name' ? fabric.name : null);
+  }
+
+  if (changes.sku) {
+    const clash = await Fabric.findOne({ where: { sku: changes.sku } });
+    if (clash && clash.id !== fabric.id) {
+      return res.status(409).json({ success: false, message: `SKU ${changes.sku} is already used by ${clash.name}` });
+    }
+  }
+
+  await fabric.update(changes);
+  const updated = await Fabric.findByPk(fabric.id, { attributes: FABRIC_LIST_ATTRIBUTES });
+  res.json({ success: true, data: { fabric: updated } });
 }));
 
 router.delete('/fabrics/:id', asyncHandler(async (req, res) => {

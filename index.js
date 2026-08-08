@@ -184,6 +184,38 @@ const startServer = async () => {
       console.log(created.length
         ? `Schema check created missing tables: ${created.join(', ')}`
         : 'Schema check: no missing tables');
+
+      // sync() leaves an existing table exactly as it found it, so a column
+      // added to a model that already has a table in production never arrives.
+      // Missing columns are added one at a time — only ever added, so a column
+      // holding live data is never altered, renamed or dropped.
+      const queryInterface = db.sequelize.getQueryInterface();
+      const addedColumns = [];
+      for (const model of Object.values(db.sequelize.models)) {
+        const tableName = model.getTableName();
+        if (created.includes(tableName)) continue;
+        let existing;
+        try {
+          existing = await queryInterface.describeTable(tableName);
+        } catch {
+          continue;
+        }
+        for (const [name, attribute] of Object.entries(model.rawAttributes)) {
+          const column = attribute.field || name;
+          if (existing[column]) continue;
+          // A NOT NULL column cannot be added to a table with rows in it unless
+          // it brings a default, so it goes in as nullable and the model keeps
+          // enforcing the rule for new writes.
+          const definition = { ...attribute };
+          delete definition.field;
+          if (definition.allowNull === false && definition.defaultValue === undefined) definition.allowNull = true;
+          await queryInterface.addColumn(tableName, column, definition);
+          addedColumns.push(`${tableName}.${column}`);
+        }
+      }
+      console.log(addedColumns.length
+        ? `Schema check added missing columns: ${addedColumns.join(', ')}`
+        : 'Schema check: no missing columns');
     }
 
     app.listen(PORT, () => {
