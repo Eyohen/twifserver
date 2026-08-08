@@ -202,9 +202,15 @@ const plainTextInvoice = (payload) => {
 
 const paymentStatusLabel = (status) => status === 'fully_paid' ? 'Fully Paid' : status === 'unpaid' ? 'Unpaid' : 'Partial Paid';
 
+// Anything that was not Ready reported as In Progress, so a customer saw "In
+// Progress" from the moment their invoice was sent — before an order sheet
+// existed, before a tailor had been assigned, and before any work had started.
+// Production sets a job to In Progress when a tailor begins it; until then the
+// order has been received and nothing more.
 const customerTrackingStatus = (status) => {
   if (status === 'Ready' || status === 'Ready for Collection') return 'Ready for Collection';
-  return 'In Progress';
+  if (status === 'In Progress') return 'In Progress';
+  return 'Order Received';
 };
 
 const formatSentInvoice = (invoice) => {
