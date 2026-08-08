@@ -495,6 +495,54 @@ router.patch('/staff/:id/tailor-grade', asyncHandler(async (req, res) => {
   });
 }));
 
+// An address differing only by case or by stray spaces is the same inbox, so
+// the check is made against a normalised form.
+const normalisedEmail = (value) => String(value || '').trim().toLowerCase();
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// A customer's email is how the invoice and the tracking link reach them, so a
+// record without one is of little use — and two customers sharing one address
+// cannot be told apart when a reply comes back.
+const findCustomerByEmail = async (email, exceptId) => {
+  const rows = await Customer.findAll({ attributes: ['id', 'fullName', 'email'] });
+  return rows.find((row) => normalisedEmail(row.email) === normalisedEmail(email) && row.id !== exceptId);
+};
+
+// Records created before the address was required, or before it had to be
+// unique, are reported here rather than deleted — a customer record carries
+// measurements and history that should not disappear without someone deciding
+// which of the two to keep.
+router.get('/customers/duplicates', asyncHandler(async (req, res) => {
+  const customers = await Customer.findAll({ order: [['createdAt', 'ASC']] });
+
+  const byEmail = new Map();
+  const missingEmail = [];
+  for (const customer of customers) {
+    const key = normalisedEmail(customer.email);
+    if (!key) { missingEmail.push(customer); continue; }
+    byEmail.set(key, [...(byEmail.get(key) || []), customer]);
+  }
+
+  const summarise = (customer) => ({
+    id: customer.id,
+    fullName: customer.fullName,
+    phone: customer.phone,
+    email: customer.email,
+    category: customer.category,
+    createdAt: customer.createdAt,
+    hasMeasurements: Object.keys(customer.measurements || {}).some((key) => key !== 'profile'),
+  });
+
+  const duplicates = [...byEmail.entries()]
+    .filter(([, rows]) => rows.length > 1)
+    .map(([email, rows]) => ({ email, customers: rows.map(summarise) }));
+
+  res.json({
+    success: true,
+    data: { duplicates, missingEmail: missingEmail.map(summarise) },
+  });
+}));
+
 router.post('/customers', asyncHandler(async (req, res) => {
   const { fullName, phone, email, category = 'New', measurements = {} } = req.body;
 
@@ -504,11 +552,27 @@ router.post('/customers', asyncHandler(async (req, res) => {
       message: 'fullName and phone are required',
     });
   }
+  if (!normalisedEmail(email)) {
+    return res.status(400).json({ success: false, message: 'An email address is required' });
+  }
+  if (!EMAIL_PATTERN.test(normalisedEmail(email))) {
+    return res.status(400).json({ success: false, message: 'Please enter a valid email address' });
+  }
+
+  const clash = await findCustomerByEmail(email);
+  if (clash) {
+    return res.status(409).json({ success: false, message: `${clash.fullName} already uses ${clash.email}` });
+  }
+
+  const existingPhone = await Customer.findOne({ where: { phone } });
+  if (existingPhone) {
+    return res.status(409).json({ success: false, message: `${existingPhone.fullName} already uses ${phone}` });
+  }
 
   const customer = await Customer.create({
     fullName,
     phone,
-    email,
+    email: String(email).trim(),
     category,
     measurements,
     portalToken: crypto.randomBytes(32).toString('hex'),
@@ -624,6 +688,17 @@ router.patch('/customers/:id', asyncHandler(async (req, res) => {
   if (!String(fullName || '').trim() || !String(phone || '').trim()) {
     return res.status(400).json({ success: false, message: 'Full name and phone number are required.' });
   }
+  if (!normalisedEmail(email)) {
+    return res.status(400).json({ success: false, message: 'An email address is required' });
+  }
+  if (!EMAIL_PATTERN.test(normalisedEmail(email))) {
+    return res.status(400).json({ success: false, message: 'Please enter a valid email address' });
+  }
+
+  const clash = await findCustomerByEmail(email, customer.id);
+  if (clash) {
+    return res.status(409).json({ success: false, message: `${clash.fullName} already uses ${clash.email}` });
+  }
 
   const existingMeasurements = customer.measurements || {};
 
@@ -637,7 +712,7 @@ router.patch('/customers/:id', asyncHandler(async (req, res) => {
   await customer.update({
     fullName: String(fullName).trim(),
     phone: String(phone).trim(),
-    email: String(email || '').trim() || null,
+    email: String(email).trim(),
     category: customerType || category || customer.category,
     storeCreditBalance: storeCreditBalance ?? customer.storeCreditBalance,
     measurements: {
