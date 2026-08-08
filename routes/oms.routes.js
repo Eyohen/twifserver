@@ -252,6 +252,7 @@ const formatSentInvoice = (invoice) => {
     eliteDiscountAmount: Number(payload.eliteDiscountAmount || 0),
     storeCreditApplied: Number(payload.storeCreditApplied || 0),
     balanceDue: Number(payload.balanceDue ?? invoice.total ?? 0),
+    paid: payload.paid ?? payload.amountPaid ?? payload.amountReceived ?? payload.paymentAmount ?? null,
     invoiceDate: payload.invoiceDate || invoice.createdAt,
     dueDate: payload.dueDate || '',
     notes: payload.notes || '',
