@@ -137,6 +137,18 @@ const DEFAULT_INVENTORY_TYPES = [
 // Cloth is measured out, everything else is counted.
 const INVENTORY_UNITS = ['yards', 'units'];
 
+// Item photos are stored as data URLs and served back from this origin, so the
+// type is pinned to real raster images. Anything else — text/html, or an SVG,
+// which can carry script — would otherwise run as a page on our own domain.
+const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const IMAGE_DATA_URL = /^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/;
+
+const safeImageDataUrl = (value) => {
+  if (typeof value !== 'string') return null;
+  const match = IMAGE_DATA_URL.exec(value.trim());
+  return match && ALLOWED_IMAGE_TYPES.has(match[1].toLowerCase()) ? value.trim() : null;
+};
+
 const trackingTokenFromUrl = (value = '') => {
   const match = String(value).match(/\/c\/([^/?#]+)/);
   return match?.[1] || '';
@@ -1237,7 +1249,7 @@ router.post('/fabrics', asyncHandler(async (req, res) => {
     location: String(location || '').trim() || null,
     supplier: String(supplier || '').trim() || null,
     lowStockThreshold: numericThreshold,
-    image: typeof image === 'string' && image.startsWith('data:') ? image : null,
+    image: safeImageDataUrl(image),
   });
   await notifyRoles(
     ['accounts'],
@@ -1283,10 +1295,18 @@ router.get('/fabrics/:id', onlyItemIds, asyncHandler(async (req, res) => {
 
 router.get('/fabrics/:id/image', asyncHandler(async (req, res) => {
   const fabric = await Fabric.findByPk(req.params.id, { attributes: ['id', 'image', 'updatedAt'] });
-  const match = /^data:([^;,]+);base64,(.+)$/.exec(fabric?.image || '');
-  if (!match) return res.status(404).json({ success: false, message: 'No image for this item' });
+  const match = IMAGE_DATA_URL.exec(fabric?.image || '');
+  const type = match?.[1].toLowerCase();
+  if (!type || !ALLOWED_IMAGE_TYPES.has(type)) {
+    return res.status(404).json({ success: false, message: 'No image for this item' });
+  }
 
-  res.set('Content-Type', match[1]);
+  // Served from the same origin as the app, so the browser is told exactly what
+  // this is, not to guess, and not to treat it as a document.
+  res.set('Content-Type', type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Content-Disposition', `inline; filename="inventory-${fabric.id}"`);
+  res.set('Content-Security-Policy', "default-src 'none'; sandbox");
   res.set('Cache-Control', 'private, max-age=300');
   res.send(Buffer.from(match[2], 'base64'));
 }));
@@ -1780,7 +1800,11 @@ router.patch('/fabrics/:id', asyncHandler(async (req, res) => {
     }
 
     if (field === 'image') {
-      changes.image = typeof raw === 'string' && raw.startsWith('data:') ? raw : null;
+      const safe = safeImageDataUrl(raw);
+      if (raw && !safe) {
+        return res.status(400).json({ success: false, message: 'Item photos must be a PNG, JPEG, WebP or GIF' });
+      }
+      changes.image = safe;
       continue;
     }
 
