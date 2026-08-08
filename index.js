@@ -54,9 +54,14 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 }));
 
+// Limits are per IP, and Railway sits behind a proxy, so a shop where several
+// staff share one connection counts as a single client. The notification bell
+// alone polls 45 times per window per open tab, so 200 was low enough that
+// normal use in a two-store business tripped it — the UI then shows empty
+// lists and "Too many requests" during the working day.
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: Number(process.env.RATE_LIMIT_MAX) || 2000,
   message: {
     success: false,
     message: 'Too many requests, please try again later.',
@@ -79,7 +84,20 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.use('/api/auth', authRoutes);
+// Credential endpoints keep a tight limit of their own, so raising the general
+// ceiling for everyday polling does not also widen the door to brute force.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.AUTH_RATE_LIMIT_MAX) || 30,
+  message: {
+    success: false,
+    message: 'Too many sign-in attempts. Please wait and try again.',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/discover', discoverRoutes);
 app.use('/api/connections', connectionsRoutes);
