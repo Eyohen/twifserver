@@ -1305,6 +1305,10 @@ router.get('/fabrics/:id/image', asyncHandler(async (req, res) => {
   // this is, not to guess, and not to treat it as a document.
   res.set('Content-Type', type);
   res.set('X-Content-Type-Options', 'nosniff');
+  // The app is served from a different origin to the API, and helmet's default
+  // same-origin resource policy would stop the browser rendering this at all.
+  // CORS still decides who may request it.
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
   res.set('Content-Disposition', `inline; filename="inventory-${fabric.id}"`);
   res.set('Content-Security-Policy', "default-src 'none'; sandbox");
   res.set('Cache-Control', 'private, max-age=300');
