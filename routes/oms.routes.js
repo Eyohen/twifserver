@@ -7,6 +7,8 @@ const { createTwifInvoiceHtml, getTwifStoreDetails } = require('../utils/twifInv
 const { sendEmail } = require('../services/email.service');
 const cloudinaryService = require('../services/cloudinary.service');
 
+const { signStaffToken, requireStaff } = require('../middleware/staffAuth');
+
 const router = express.Router();
 const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment } = db;
 
@@ -78,6 +80,23 @@ const profileImageUpload = multer({
   },
 });
 
+// Everything in the OMS is staff-only, with three deliberate exceptions:
+// signing in, the customer's own tracking link and profile, and the inventory
+// item photographs, which are loaded straight into an <img> and so cannot carry
+// an Authorization header. The photographs are pictures of cloth and boxes —
+// the least sensitive thing here — but the exception is written down rather
+// than left to be discovered.
+const PUBLIC_PATHS = [
+  /^\/auth\/login$/,
+  /^\/track\//,
+  /^\/fabrics\/[^/]+\/image$/,
+];
+
+router.use((req, res, next) => {
+  if (PUBLIC_PATHS.some((pattern) => pattern.test(req.path))) return next();
+  return requireStaff(req, res, next);
+});
+
 const knownStaffAccounts = {
   '08000000001': { pin: 'owner26', displayName: 'Jenni', role: 'owner', store: 'all' },
   '08000000002': { pin: 'admin26', displayName: 'Jim', role: 'admin', store: 'all' },
@@ -107,6 +126,69 @@ const verifiedStaffForProfile = async (phone, pin) => {
   });
   return createdStaff;
 };
+
+// Signing in. The PIN was checked in the browser against a list compiled into
+// the JavaScript, so all seven were readable by anyone who opened the bundle.
+// It is checked here now, against a bcrypt hash, and the caller gets a token
+// the rest of the API requires.
+router.post('/auth/login', asyncHandler(async (req, res) => {
+  const phone = String(req.body?.phone || '').trim();
+  const pin = String(req.body?.pin || '').trim();
+
+  if (!phone || !pin) {
+    return res.status(400).json({ success: false, message: 'Enter your phone number and PIN' });
+  }
+
+  const staff = await verifiedStaffForProfile(phone, pin);
+  // One message for a wrong number and a wrong PIN, so it cannot be used to
+  // find out which numbers are real.
+  if (!staff) {
+    return res.status(401).json({ success: false, message: 'That phone number and PIN do not match' });
+  }
+  if (staff.status !== 'active') {
+    return res.status(403).json({ success: false, message: 'This account is no longer active' });
+  }
+
+  await staff.update({ lastLoginAt: new Date() });
+
+  res.json({
+    success: true,
+    data: {
+      token: signStaffToken(staff),
+      staff: {
+        id: staff.id,
+        phone: staff.phone,
+        displayName: staff.displayName,
+        role: staff.role,
+        store: staff.store,
+        profileImageUrl: staff.profileImageUrl,
+        tailorDepartment: staff.tailorDepartment,
+        tailorGrade: staff.tailorGrade,
+      },
+    },
+  });
+}));
+
+// Who the caller is, used to restore a session on reload rather than trusting
+// whatever the browser has in local storage.
+router.get('/auth/me', asyncHandler(async (req, res) => {
+  const staff = req.staff;
+  res.json({
+    success: true,
+    data: {
+      staff: {
+        id: staff.id,
+        phone: staff.phone,
+        displayName: staff.displayName,
+        role: staff.role,
+        store: staff.store,
+        profileImageUrl: staff.profileImageUrl,
+        tailorDepartment: staff.tailorDepartment,
+        tailorGrade: staff.tailorGrade,
+      },
+    },
+  });
+}));
 
 const invoiceNumber = () => {
   const year = new Date().getFullYear();

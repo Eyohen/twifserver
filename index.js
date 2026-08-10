@@ -60,6 +60,10 @@ app.use(cors({
 // normal use in a two-store business tripped it — the UI then shows empty
 // lists and "Too many requests" during the working day.
 app.use(rateLimit({
+  // The general ceiling is there for the open internet. Throttling a local run
+  // only makes an automated check look like a product fault; the sign-in limit
+  // below is not skipped, because that is the one that matters.
+  skip: () => process.env.NODE_ENV !== 'production',
   windowMs: 15 * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_MAX) || 2000,
   message: {
@@ -97,6 +101,21 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Staff sign-in had no limit of its own: seven phone numbers are easy to guess
+// and a PIN is short, so it was open to being tried repeatedly until one fit.
+const staffLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.STAFF_LOGIN_RATE_LIMIT_MAX) || 12,
+  skipSuccessfulRequests: true,
+  message: {
+    success: false,
+    message: 'Too many sign-in attempts. Please wait a few minutes and try again.',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use('/api/oms/auth/login', staffLoginLimiter);
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/discover', discoverRoutes);
