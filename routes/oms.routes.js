@@ -8,7 +8,7 @@ const { sendEmail } = require('../services/email.service');
 const cloudinaryService = require('../services/cloudinary.service');
 
 const router = express.Router();
-const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest } = db;
+const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment } = db;
 
 // The channel drives the category filter in the notification inbox, so it is
 // derived from the event rather than hardcoded.
@@ -25,6 +25,7 @@ const CHANNEL_BY_EVENT = {
   inventory_edit_approved: 'Inventory',
   inventory_edit_rejected: 'Inventory',
   fabric_allocated: 'Inventory',
+  job_comment: 'Production',
   low_stock: 'Inventory',
   customer_updated: 'System',
   customer_archived: 'System',
@@ -46,6 +47,7 @@ const TITLE_BY_EVENT = {
   inventory_edit_approved: 'Inventory edit approved',
   inventory_edit_rejected: 'Inventory edit rejected',
   fabric_allocated: 'Fabric allocated to a job',
+  job_comment: 'New comment on a job',
   low_stock: 'Low stock threshold reached',
   customer_updated: 'Customer profile updated',
   customer_archived: 'Customer profile archived',
@@ -1179,6 +1181,57 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       },
     },
   });
+}));
+
+// A job sheet's comment thread. Everyone who touches the job reads and writes
+// the same thread, so a question about a garment stays with the garment rather
+// than in someone's phone.
+router.get('/jobs/:invoiceNumber/comments', asyncHandler(async (req, res) => {
+  const comments = await JobComment.findAll({
+    where: { invoiceNumber: req.params.invoiceNumber },
+    order: [['createdAt', 'ASC']],
+  });
+  res.json({ success: true, data: { comments } });
+}));
+
+router.post('/jobs/:invoiceNumber/comments', asyncHandler(async (req, res) => {
+  const { invoiceNumber } = req.params;
+  const body = String(req.body?.body || '').trim();
+  const authorName = String(req.body?.authorName || '').trim();
+  const authorRole = String(req.body?.authorRole || '').trim();
+
+  if (!body) return res.status(400).json({ success: false, message: 'A comment cannot be empty' });
+  if (body.length > 2000) return res.status(400).json({ success: false, message: 'That comment is too long' });
+  if (!authorName || !authorRole) {
+    return res.status(400).json({ success: false, message: 'A comment needs an author' });
+  }
+
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'That job could not be found' });
+
+  const comment = await JobComment.create({ invoiceNumber, authorName, authorRole, body });
+
+  // Everyone on the job hears about it except whoever just wrote it.
+  const sheet = invoice.payload?.orderSheet || {};
+  const audience = new Set(['production_manager', 'store_manager']);
+  audience.delete(authorRole);
+  await notifyRoles(
+    [...audience],
+    `${authorName} commented on ${invoiceNumber}: ${body.length > 90 ? `${body.slice(0, 90)}…` : body}`,
+    { invoiceNumber, event: 'job_comment' }
+  );
+
+  // A tailor's notifications are addressed by name through metadata.tailorName,
+  // which is how the inbox filters them, rather than by a recipient column.
+  if (sheet.tailor && sheet.tailor !== 'Unassigned' && authorName !== sheet.tailor) {
+    await notifyRoles(
+      ['tailor'],
+      `${authorName} commented on ${invoiceNumber}: ${body.length > 90 ? `${body.slice(0, 90)}…` : body}`,
+      { invoiceNumber, event: 'job_comment', tailorName: sheet.tailor }
+    );
+  }
+
+  res.status(201).json({ success: true, data: { comment } });
 }));
 
 router.post('/order-sheets', asyncHandler(async (req, res) => {
