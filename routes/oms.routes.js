@@ -1128,6 +1128,25 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
   });
 }));
 
+// A job may only be worked once Accounts have approved the invoice, the
+// customer has paid something, and the garment has measurements. Enforced here
+// as well as on screen: a rule that only the interface applies is a suggestion.
+const WORKING_STATUSES = ['Assigned', 'In Progress', 'Ready'];
+
+const productionBlockReason = (invoice, orderSheet) => {
+  const payload = invoice.payload || {};
+  if (payload.accountApprovalStatus !== 'Approved') return 'Accounts have not approved this invoice yet';
+  if (invoice.paymentStatus === 'unpaid') return 'This invoice is unpaid, so it cannot go to production';
+
+  const details = orderSheet.measurementDetails;
+  const hasFigures = details && typeof details === 'object'
+    && Object.values(details).some((value) => String(value ?? '').trim());
+  if (!hasFigures && !String(orderSheet.measurements ?? '').trim()) {
+    return 'This order has no measurements, so it cannot go to production';
+  }
+  return null;
+};
+
 router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   const invoice = await findSentInvoiceByTrackingToken(req.params.token);
 
@@ -1145,6 +1164,19 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
     ...req.body,
     updatedAt: new Date().toISOString(),
   };
+
+  // Assigning a tailor, starting work or marking a garment ready are all ways
+  // of putting a job into production, so each is refused while the order is
+  // held. Everything else about the sheet can still be edited.
+  const entersProduction = (WORKING_STATUSES.includes(nextOrderSheet.status)
+    && !WORKING_STATUSES.includes(previousOrderSheet.status))
+    || (nextOrderSheet.tailor && nextOrderSheet.tailor !== 'Unassigned'
+      && nextOrderSheet.tailor !== previousOrderSheet.tailor);
+
+  if (entersProduction) {
+    const blocked = productionBlockReason(invoice, nextOrderSheet);
+    if (blocked) return res.status(409).json({ success: false, message: blocked });
+  }
 
   await invoice.update({
     payload: {
