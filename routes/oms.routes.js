@@ -429,7 +429,7 @@ router.get('/stores', (req, res) => {
   });
 });
 
-router.post('/staff', asyncHandler(async (req, res) => {
+router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
   const {
     phone,
     pin,
@@ -439,14 +439,7 @@ router.post('/staff', asyncHandler(async (req, res) => {
     dateOfBirth,
     tailorDepartment,
     tailorGrade,
-    ownerPhone,
-    ownerPin,
   } = req.body;
-
-  const owner = await verifiedStaffForProfile(ownerPhone, ownerPin);
-  if (!owner || owner.role !== 'owner') {
-    return res.status(403).json({ success: false, message: 'Only the Owner can create staff accounts' });
-  }
 
   if (!phone || !pin || !displayName || !role) {
     return res.status(400).json({
@@ -497,12 +490,8 @@ router.get('/staff', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { staffUsers } });
 }));
 
-router.patch('/staff/:id', asyncHandler(async (req, res) => {
-  const { ownerPhone, ownerPin, pin, ...requestedUpdates } = req.body;
-  const owner = await verifiedStaffForProfile(ownerPhone, ownerPin);
-  if (!owner || owner.role !== 'owner') {
-    return res.status(403).json({ success: false, message: 'Only the Owner can update staff accounts' });
-  }
+router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) => {
+  const { pin, ...requestedUpdates } = req.body;
 
   const staffUser = await StaffUser.findByPk(req.params.id);
   if (!staffUser) return res.status(404).json({ success: false, message: 'Staff account not found' });
@@ -552,15 +541,10 @@ router.get('/staff/:id/logins', requireRole('owner', 'admin'), asyncHandler(asyn
   res.json({ success: true, data: { events } });
 }));
 
-router.delete('/staff/:id', asyncHandler(async (req, res) => {
-  const { ownerPhone, ownerPin } = req.body;
-  const owner = await verifiedStaffForProfile(ownerPhone, ownerPin);
-  if (!owner || owner.role !== 'owner') {
-    return res.status(403).json({ success: false, message: 'Only the Owner can delete staff accounts' });
-  }
+router.delete('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) => {
   const staffUser = await StaffUser.findByPk(req.params.id);
   if (!staffUser) return res.status(404).json({ success: false, message: 'Staff account not found' });
-  if (staffUser.id === owner.id) {
+  if (staffUser.id === req.staff.id) {
     return res.status(400).json({ success: false, message: 'The Owner cannot delete their own account' });
   }
   await staffUser.destroy();
@@ -571,9 +555,13 @@ router.post('/staff/:phone/profile-image', profileImageUpload.single('image'), a
   if (!req.file) {
     return res.status(400).json({ success: false, message: 'Select an image to upload' });
   }
-  const staffUser = await verifiedStaffForProfile(req.params.phone, req.body.pin);
-  if (!staffUser) {
-    return res.status(403).json({ success: false, message: 'Unable to verify this staff account' });
+  // Was verified by re-sending the PIN, which the app no longer holds, so no
+  // photo could be uploaded at all. The token says who is asking: a member of
+  // staff changes their own picture, and the Owner may change anyone's.
+  const staffUser = await StaffUser.findOne({ where: { phone: req.params.phone } });
+  if (!staffUser) return res.status(404).json({ success: false, message: 'Staff account not found' });
+  if (staffUser.id !== req.staff.id && req.staff.role !== 'owner') {
+    return res.status(403).json({ success: false, message: 'That is not your account' });
   }
 
   const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
@@ -589,6 +577,9 @@ router.post('/staff/:phone/profile-image', profileImageUpload.single('image'), a
 
 router.delete('/staff/:phone/profile-image', asyncHandler(async (req, res) => {
   const staffUser = await StaffUser.findOne({ where: { phone: req.params.phone } });
+  if (staffUser && staffUser.id !== req.staff.id && req.staff.role !== 'owner') {
+    return res.status(403).json({ success: false, message: 'That is not your account' });
+  }
   if (!staffUser) {
     return res.status(404).json({ success: false, message: 'Staff account not found' });
   }
@@ -599,17 +590,13 @@ router.delete('/staff/:phone/profile-image', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { profileImageUrl: null } });
 }));
 
-router.patch('/staff/:id/tailor-grade', asyncHandler(async (req, res) => {
-  const { grade, ownerPhone, ownerPin } = req.body;
+router.patch('/staff/:id/tailor-grade', requireRole('owner'), asyncHandler(async (req, res) => {
+  const { grade } = req.body;
   const numericGrade = Number(grade);
   if (!Number.isInteger(numericGrade) || numericGrade < 1 || numericGrade > 5) {
     return res.status(400).json({ success: false, message: 'Tailor grade must be a whole number from 1 to 5' });
   }
 
-  const owner = await verifiedStaffForProfile(ownerPhone, ownerPin);
-  if (!owner || owner.role !== 'owner') {
-    return res.status(403).json({ success: false, message: 'Only the Owner can update tailor grades' });
-  }
 
   const tailor = await StaffUser.findOne({ where: { id: req.params.id, role: 'tailor' } });
   if (!tailor) {
@@ -1714,10 +1701,9 @@ router.get('/inventory-edit-requests', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { requests: requests.map((request) => ({ ...request.toJSON(), fabric: byId.get(request.fabricId) || null })) } });
 }));
 
-router.patch('/inventory-edit-requests/:id/review', asyncHandler(async (req, res) => {
-  const { decision, ownerPhone, ownerPin, reviewNote = '' } = req.body;
-  const owner = await verifiedStaffForProfile(String(ownerPhone || ''), String(ownerPin || ''));
-  if (!owner || owner.role !== 'owner') return res.status(403).json({ success: false, message: 'Only a verified Owner can approve or reject inventory edits.' });
+router.patch('/inventory-edit-requests/:id/review', requireRole('owner'), asyncHandler(async (req, res) => {
+  const { decision, reviewNote = '' } = req.body;
+  const owner = req.staff;
   if (!['Approved', 'Rejected'].includes(decision)) return res.status(400).json({ success: false, message: 'Decision must be Approved or Rejected.' });
   const request = await InventoryEditRequest.findByPk(req.params.id);
   if (!request) return res.status(404).json({ success: false, message: 'Inventory edit request not found.' });
