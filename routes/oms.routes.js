@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const db = require('../models');
@@ -7,10 +8,10 @@ const { createTwifInvoiceHtml, getTwifStoreDetails } = require('../utils/twifInv
 const { sendEmail } = require('../services/email.service');
 const cloudinaryService = require('../services/cloudinary.service');
 
-const { signStaffToken, requireStaff } = require('../middleware/staffAuth');
+const { signStaffToken, requireStaff, requireRole } = require('../middleware/staffAuth');
 
 const router = express.Router();
-const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment } = db;
+const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment, StaffLoginEvent } = db;
 
 // The channel drives the category filter in the notification inbox, so it is
 // derived from the event rather than hardcoded.
@@ -28,6 +29,7 @@ const CHANNEL_BY_EVENT = {
   inventory_edit_rejected: 'Inventory',
   fabric_allocated: 'Inventory',
   job_comment: 'Production',
+  payment_recorded: 'Payments',
   low_stock: 'Inventory',
   customer_updated: 'System',
   customer_archived: 'System',
@@ -50,6 +52,7 @@ const TITLE_BY_EVENT = {
   inventory_edit_rejected: 'Inventory edit rejected',
   fabric_allocated: 'Fabric allocated to a job',
   job_comment: 'New comment on a job',
+  payment_recorded: 'Payment recorded',
   low_stock: 'Low stock threshold reached',
   customer_updated: 'Customer profile updated',
   customer_archived: 'Customer profile archived',
@@ -140,15 +143,30 @@ router.post('/auth/login', asyncHandler(async (req, res) => {
   }
 
   const staff = await verifiedStaffForProfile(phone, pin);
+
+  // Every attempt is recorded, so an owner can see who signed in and when a
+  // number was being guessed at. A failure to write the record must not stop
+  // someone signing in.
+  const recordAttempt = (outcome, staffUser) => StaffLoginEvent.create({
+    staffUserId: staffUser?.id || null,
+    phone,
+    outcome,
+    ipAddress: req.ip || null,
+    userAgent: String(req.get('user-agent') || '').slice(0, 400) || null,
+  }).catch((error) => console.error('Login event not recorded:', error.message));
+
   // One message for a wrong number and a wrong PIN, so it cannot be used to
   // find out which numbers are real.
   if (!staff) {
+    await recordAttempt('wrong_credentials', null);
     return res.status(401).json({ success: false, message: 'That phone number and PIN do not match' });
   }
   if (staff.status !== 'active') {
+    await recordAttempt('inactive_account', staff);
     return res.status(403).json({ success: false, message: 'This account is no longer active' });
   }
 
+  await recordAttempt('success', staff);
   await staff.update({ lastLoginAt: new Date() });
 
   res.json({
@@ -337,6 +355,7 @@ const formatSentInvoice = (invoice) => {
     storeCreditApplied: Number(payload.storeCreditApplied || 0),
     balanceDue: Number(payload.balanceDue ?? invoice.total ?? 0),
     paid: payload.paid ?? payload.amountPaid ?? payload.amountReceived ?? payload.paymentAmount ?? null,
+    paymentHistory: Array.isArray(payload.paymentHistory) ? payload.paymentHistory : [],
     invoiceDate: payload.invoiceDate || invoice.createdAt,
     dueDate: payload.dueDate || '',
     notes: payload.notes || '',
@@ -503,10 +522,34 @@ router.patch('/staff/:id', asyncHandler(async (req, res) => {
     updates.tailorDepartment = null;
     updates.tailorGrade = null;
   }
-  if (pin) updates.pinHash = await bcrypt.hash(pin, 12);
+  // A PIN that has been reset has usually been reset because it was known to
+  // someone else, so every session it opened is ended with it.
+  if (pin) {
+    if (String(pin).trim().length < 4) {
+      return res.status(400).json({ success: false, message: 'A PIN must be at least 4 characters' });
+    }
+    updates.pinHash = await bcrypt.hash(String(pin).trim(), 12);
+    updates.forceLogoutAt = new Date();
+  }
 
   await staffUser.update(updates);
   res.json({ success: true, data: { staffUser } });
+}));
+
+// Who has tried to sign in to this account, successfully or not. Restricted to
+// the two roles that manage accounts: it names IP addresses and failed tries.
+router.get('/staff/:id/logins', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const staffUser = await StaffUser.findByPk(req.params.id);
+  if (!staffUser) return res.status(404).json({ success: false, message: 'Staff account not found' });
+
+  // Matched on the phone number as well as the id, so attempts against a number
+  // that belongs to nobody yet — or to an account created later — still show.
+  const events = await StaffLoginEvent.findAll({
+    where: { [Op.or]: [{ staffUserId: staffUser.id }, { phone: staffUser.phone }] },
+    order: [['createdAt', 'DESC']],
+    limit: 100,
+  });
+  res.json({ success: true, data: { events } });
 }));
 
 router.delete('/staff/:id', asyncHandler(async (req, res) => {
@@ -603,7 +646,9 @@ const findCustomerByEmail = async (email, exceptId) => {
 // unique, are reported here rather than deleted — a customer record carries
 // measurements and history that should not disappear without someone deciding
 // which of the two to keep.
-router.get('/customers/duplicates', asyncHandler(async (req, res) => {
+// The report names every customer sharing an address, so it stays with the two
+// roles that can act on it rather than with all staff.
+router.get('/customers/duplicates', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
   const customers = await Customer.findAll({ order: [['createdAt', 'ASC']] });
 
   const byEmail = new Map();
@@ -673,8 +718,14 @@ router.post('/customers', asyncHandler(async (req, res) => {
 }));
 
 router.get('/customers', asyncHandler(async (req, res) => {
+  // Archiving used to set the category and nothing else, so the customer came
+  // straight back on the next load and the button looked broken.
+  const includeArchived = String(req.query.includeArchived || '') === 'true';
   const [customerRecords, sentInvoices] = await Promise.all([
-    Customer.findAll({ order: [['createdAt', 'DESC']] }),
+    Customer.findAll({
+      where: includeArchived ? {} : { category: { [Op.ne]: 'Archived' } },
+      order: [['createdAt', 'DESC']],
+    }),
     SentInvoice.findAll({ order: [['createdAt', 'DESC']], limit: 500 }),
   ]);
   const profiles = [];
@@ -800,11 +851,20 @@ router.patch('/customers/:id', asyncHandler(async (req, res) => {
     ? Object.fromEntries(Object.entries(bodyMeasurements).filter(([, value]) => String(value ?? '').trim()))
     : null;
 
+  // The Edit screen's status select is the other way to archive someone, and it
+  // only ever wrote to the profile block — so the customer stayed in the list.
+  const status = String(profile.status || '').trim();
+  const nextCategory = status === 'Archived'
+    ? 'Archived'
+    : (customer.category === 'Archived' && status && status !== 'Archived'
+      ? (customerType || category || 'Returning')
+      : (customerType || category || customer.category));
+
   await customer.update({
     fullName: String(fullName).trim(),
     phone: String(phone).trim(),
     email: String(email).trim(),
-    category: customerType || category || customer.category,
+    category: nextCategory,
     storeCreditBalance: storeCreditBalance ?? customer.storeCreditBalance,
     measurements: {
       ...existingMeasurements,
@@ -1061,6 +1121,66 @@ router.patch('/invoices/:invoiceNumber/account-approval', asyncHandler(async (re
       invoice: formatSentInvoice(refreshedInvoice),
     },
   });
+}));
+
+// Recording what a customer actually handed over. An invoice carried a status —
+// unpaid, part paid, fully paid — but no figure, so Accounts could not
+// reconcile and every screen that wanted an amount had to invent one.
+//
+// The status follows the money rather than being set by hand: nothing received
+// is unpaid, part of it is part paid, all of it is fully paid. That matters
+// beyond bookkeeping, because an unpaid order is held out of production.
+router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner', 'admin'), asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+  const amount = Number(req.body?.amountReceived);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return res.status(400).json({ success: false, message: 'Enter the amount received as a number' });
+  }
+
+  const payload = invoice.payload || {};
+  const payable = Math.max(
+    0,
+    Number(invoice.total || 0) - Number(payload.eliteDiscountAmount || 0) - Number(payload.storeCreditApplied || 0),
+  );
+
+  if (amount > payable) {
+    return res.status(400).json({
+      success: false,
+      message: `That is more than the ${payable.toLocaleString('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 })} owed on this invoice`,
+    });
+  }
+
+  const paymentStatus = amount <= 0 ? 'unpaid' : amount >= payable ? 'fully_paid' : 'partial_paid';
+  const method = String(req.body?.method || payload.paymentMethod || 'transfer');
+
+  // Each entry is kept, so how a balance was reached can be read back rather
+  // than inferred from the total.
+  const history = [
+    ...(Array.isArray(payload.paymentHistory) ? payload.paymentHistory : []),
+    {
+      amount,
+      method,
+      note: String(req.body?.note || '').trim() || null,
+      recordedBy: req.staff.displayName,
+      recordedAt: new Date().toISOString(),
+    },
+  ];
+
+  await invoice.update({
+    paymentStatus,
+    payload: { ...payload, paid: amount, paymentMethod: method, paymentHistory: history },
+  });
+
+  const refreshed = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  await notifyRoles(
+    ['store_manager', 'owner'],
+    `${req.staff.displayName} recorded ${amount.toLocaleString('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 })} against ${invoice.invoiceNumber}.`,
+    { invoiceNumber: invoice.invoiceNumber, event: 'payment_recorded' },
+  );
+
+  res.json({ success: true, data: { invoice: formatSentInvoice(refreshed) } });
 }));
 
 router.get('/track/:token', asyncHandler(async (req, res) => {

@@ -16,6 +16,7 @@ const activeModelFiles = [
   'inventoryAllocation.js',
   'inventoryEditRequest.js',
   'jobComment.js',
+  'staffLoginEvent.js',
   'sentInvoice.js',
   // Backs OMS settings and membership tiers as JSON rows, which avoids a
   // table per feature in an environment where migrations do not run.
