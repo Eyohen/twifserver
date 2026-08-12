@@ -540,6 +540,7 @@ const formatSentInvoice = (invoice) => {
     customer: invoice.customerName,
     store: invoice.store === 'ikeja' ? 'Ikeja' : 'Lekki',
     createdBy: invoice.createdByName,
+    createdByStaffId: invoice.createdByStaffId,
     createdAt: new Intl.DateTimeFormat('en-GB', {
       day: '2-digit',
       month: 'short',
@@ -1232,7 +1233,10 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     customerName: payload.customer.name || payload.customer.fullName,
     customerEmail: recipientEmail,
     customerPhone: payload.customer.phone || null,
-    createdByName: req.body.createdByName || 'Store Manager',
+    // Taken from the signed-in session, not from the request body: it decides
+    // who may edit the invoice later.
+    createdByStaffId: req.staff?.id || null,
+    createdByName: req.staff?.displayName || req.body.createdByName || 'Store Manager',
     total: Number(payload.balanceDue || 0),
     paymentStatus: ['unpaid', 'partial_paid', 'fully_paid'].includes(payload.paymentStatus) ? payload.paymentStatus : 'partial_paid',
     emailStatus: 'failed',
@@ -1705,12 +1709,15 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
 // An invoice belongs to whoever raised it and to the people who run the shop.
 // A store manager may correct their own; only an Owner or Admin may remove one,
 // even one they raised themselves — a deleted invoice is a hole in the accounts.
-const mayEditInvoice = (staff, invoice) => (
-  ['owner', 'admin'].includes(staff?.role)
-  || (invoice.createdByName && invoice.createdByName === staff?.displayName)
-);
+const mayEditInvoice = (staff, invoice) => {
+  if (['owner', 'admin'].includes(staff?.role)) return true;
+  // Matched on the creator's id. Invoices raised before that was recorded have
+  // no id to match, and are the Owner's and Admin's to correct — a display name
+  // is not proof of anything, since two people can share one.
+  return Boolean(invoice.createdByStaffId) && invoice.createdByStaffId === staff?.id;
+};
 
-router.patch('/invoices/:invoiceNumber', asyncHandler(async (req, res) => {
+router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_manager', 'accounts'), asyncHandler(async (req, res) => {
   const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
   if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
   if (!mayEditInvoice(req.staff, invoice)) {

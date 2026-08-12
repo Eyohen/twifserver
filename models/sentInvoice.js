@@ -28,6 +28,13 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING(32),
       allowNull: true,
     },
+    // Who raised it, as an id rather than a name. A display name is not unique
+    // and was taken from the request body, so "the person who raised this" was
+    // a claim anyone could make and anyone sharing that name could satisfy.
+    createdByStaffId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
     createdByName: {
       type: DataTypes.STRING(120),
       allowNull: false,
