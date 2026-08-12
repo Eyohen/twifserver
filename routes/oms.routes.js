@@ -2,6 +2,9 @@ const express = require('express');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const otp = require('otplib');
+const QRCode = require('qrcode');
 const multer = require('multer');
 const db = require('../models');
 const { createTwifInvoiceHtml, getTwifStoreDetails } = require('../utils/twifInvoiceTemplate');
@@ -91,6 +94,10 @@ const profileImageUpload = multer({
 // than left to be discovered.
 const PUBLIC_PATHS = [
   /^\/auth\/login$/,
+  // The second step of signing in carries a ticket of its own rather than a
+  // session, so it cannot require one. Enrolment is the same: an Admin who has
+  // not set up their authenticator yet has no session to set it up with.
+  /^\/auth\/2fa\/(verify|setup|confirm)$/,
   /^\/track\//,
   /^\/fabrics\/[^/]+\/image$/,
 ];
@@ -168,6 +175,20 @@ router.post('/auth/login', asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'This account is no longer active' });
   }
 
+  // An Admin's PIN gets them as far as the second step and no further. A ticket
+  // is not a session: it cannot be used against the API.
+  if (requiresTwoFactor(staff)) {
+    return res.json({
+      success: true,
+      data: {
+        twoFactorRequired: true,
+        enrolled: Boolean(staff.twoFactorEnabledAt),
+        ticket: signTwoFactorTicket(staff),
+        displayName: staff.displayName,
+      },
+    });
+  }
+
   await recordAttempt('success', staff);
   await staff.update({ lastLoginAt: new Date() });
 
@@ -184,6 +205,197 @@ router.post('/auth/login', asyncHandler(async (req, res) => {
         profileImageUrl: staff.profileImageUrl,
         tailorDepartment: staff.tailorDepartment,
         tailorGrade: staff.tailorGrade,
+        // So the account screen can say whether two-factor is on and how many
+        // recovery codes are left, without ever handing back the secret.
+        twoFactorRequired: requiresTwoFactor(staff),
+        twoFactorEnabled: Boolean(staff.twoFactorEnabledAt),
+        recoveryCodesLeft: (staff.twoFactorRecoveryCodes || []).length,
+      },
+    },
+  });
+}));
+
+// Two-factor sign-in. Required of the Admin role, which is the account that can
+// reach every part of the shop's records — a phone number and a short PIN is
+// not enough on its own. Everyone else signs in with phone and PIN.
+const TWO_FACTOR_ROLES = ['admin'];
+const requiresTwoFactor = (staff) => TWO_FACTOR_ROLES.includes(staff?.role);
+
+// A short-lived ticket that says "this person's PIN was right, now prove the
+// second factor". It is not a session: it cannot be used against the API.
+const signTwoFactorTicket = (staff) => jwt.sign(
+  { sub: staff.id, stage: 'awaiting_2fa' },
+  process.env.JWT_SECRET || 'twif-dev-secret',
+  { expiresIn: '5m' }
+);
+
+const readTwoFactorTicket = (ticket) => {
+  try {
+    const claims = jwt.verify(ticket, process.env.JWT_SECRET || 'twif-dev-secret');
+    return claims.stage === 'awaiting_2fa' ? claims.sub : null;
+  } catch {
+    return null;
+  }
+};
+
+// Recovery codes are the way back in from a lost phone. They are shown once, at
+// enrolment, and stored hashed — a stolen database gives up no working code.
+// A recovery code is not six digits, and the verifier throws on a token that
+// is not the shape it expects — which would turn "wrong code" into a 500.
+const isAppCode = (secret, token) => {
+  if (!secret || !/^\d{6}$/.test(String(token || '').trim())) return false;
+  try {
+    return otp.verifySync({ token: String(token).trim(), secret }).valid;
+  } catch {
+    return false;
+  }
+};
+
+const makeRecoveryCodes = async () => {
+  const plain = Array.from({ length: 8 }, () => crypto.randomBytes(5).toString('hex').toUpperCase().match(/.{1,5}/g).join('-'));
+  const hashed = await Promise.all(plain.map((code) => bcrypt.hash(code, 10)));
+  return { plain, hashed };
+};
+
+const spendRecoveryCode = async (staff, candidate) => {
+  const codes = Array.isArray(staff.twoFactorRecoveryCodes) ? staff.twoFactorRecoveryCodes : [];
+  const cleaned = String(candidate || '').trim().toUpperCase();
+  if (!cleaned) return false;
+  for (const [index, hash] of codes.entries()) {
+    if (await bcrypt.compare(cleaned, hash)) {
+      // A recovery code works once.
+      await staff.update({ twoFactorRecoveryCodes: codes.filter((_, position) => position !== index) });
+      return true;
+    }
+  }
+  return false;
+};
+
+// Starting enrolment: a secret and the barcode to scan. Nothing is switched on
+// until a code from the app confirms the phone and the server agree.
+// Either an already signed-in member of staff, or somebody part-way through
+// signing in who has passed their PIN and is now enrolling.
+const staffForEnrolment = async (req) => {
+  if (req.staff) return req.staff;
+  const staffId = readTwoFactorTicket(req.body?.ticket);
+  if (!staffId) return null;
+  const staff = await StaffUser.findByPk(staffId);
+  return staff && staff.status === 'active' ? staff : null;
+};
+
+router.post('/auth/2fa/setup', asyncHandler(async (req, res) => {
+  const staff = await staffForEnrolment(req);
+  if (!staff) return res.status(401).json({ success: false, message: 'Sign in first' });
+  if (staff.twoFactorEnabledAt) {
+    return res.status(409).json({ success: false, message: 'Two-factor sign-in is already on for this account' });
+  }
+
+  const secret = otp.generateSecret();
+  const uri = otp.generateURI({ secret, label: staff.displayName, issuer: 'twif OMS' });
+  const qr = await QRCode.toDataURL(uri, { margin: 1, width: 240 });
+
+  // Held against the account unconfirmed: enabledAt is what makes it live.
+  await staff.update({ twoFactorSecret: secret });
+  res.json({ success: true, data: { qr, secret, uri } });
+}));
+
+router.post('/auth/2fa/confirm', asyncHandler(async (req, res) => {
+  const staff = await staffForEnrolment(req);
+  if (!staff) return res.status(401).json({ success: false, message: 'Sign in first' });
+  if (!staff.twoFactorSecret) {
+    return res.status(409).json({ success: false, message: 'Start setting up two-factor sign-in first' });
+  }
+  if (!isAppCode(staff.twoFactorSecret, req.body?.code)) {
+    return res.status(400).json({ success: false, message: 'That code does not match. Check the app and try again.' });
+  }
+
+  const { plain, hashed } = await makeRecoveryCodes();
+  await staff.update({ twoFactorEnabledAt: new Date(), twoFactorRecoveryCodes: hashed });
+  await notifyRoles(['owner'], `${staff.displayName} turned on two-factor sign-in.`, { event: 'two_factor_enabled' });
+
+  // The only time the codes are readable. They are hashed on the way in.
+  res.json({
+    success: true,
+    data: {
+      recoveryCodes: plain,
+      // Enrolling as part of signing in finishes the sign-in.
+      ...(req.staff ? {} : {
+        token: signStaffToken(staff),
+        staff: {
+          id: staff.id, phone: staff.phone, displayName: staff.displayName, role: staff.role,
+          store: staff.store, profileImageUrl: staff.profileImageUrl,
+          tailorDepartment: staff.tailorDepartment, tailorGrade: staff.tailorGrade,
+        },
+      }),
+    },
+  });
+}));
+
+// Turning it off is the Owner's to do, or your own with a current code — so a
+// lost phone cannot be used to lock somebody out of their own account.
+router.post('/auth/2fa/disable', asyncHandler(async (req, res) => {
+  const targetId = req.body?.staffId || req.staff.id;
+  const isSelf = targetId === req.staff.id;
+  if (!isSelf && req.staff.role !== 'owner') {
+    return res.status(403).json({ success: false, message: 'Only the Owner can turn off two-factor sign-in for someone else' });
+  }
+
+  const staff = isSelf ? req.staff : await StaffUser.findByPk(targetId);
+  if (!staff) return res.status(404).json({ success: false, message: 'Staff account not found' });
+
+  if (isSelf) {
+    const code = String(req.body?.code || '').trim();
+    if (!isAppCode(staff.twoFactorSecret, code) && !(await spendRecoveryCode(staff, code))) {
+      return res.status(400).json({ success: false, message: 'Enter a current code from your authenticator app, or a recovery code' });
+    }
+  }
+
+  await staff.update({ twoFactorSecret: null, twoFactorEnabledAt: null, twoFactorRecoveryCodes: [] });
+  res.json({ success: true, message: 'Two-factor sign-in is off' });
+}));
+
+// The second step of signing in: the ticket from the PIN, plus the code.
+router.post('/auth/2fa/verify', asyncHandler(async (req, res) => {
+  const staffId = readTwoFactorTicket(req.body?.ticket);
+  if (!staffId) {
+    return res.status(401).json({ success: false, message: 'That sign-in has expired. Start again.' });
+  }
+  const staff = await StaffUser.findByPk(staffId);
+  if (!staff || staff.status !== 'active') {
+    return res.status(401).json({ success: false, message: 'That sign-in has expired. Start again.' });
+  }
+
+  const code = String(req.body?.code || '').trim();
+  const fromApp = isAppCode(staff.twoFactorSecret, code);
+  const fromRecovery = fromApp ? false : await spendRecoveryCode(staff, code);
+  if (!fromApp && !fromRecovery) {
+    await StaffLoginEvent.create({
+      staffUserId: staff.id, phone: staff.phone, outcome: 'wrong_credentials',
+      ipAddress: req.ip || null, userAgent: String(req.get('user-agent') || '').slice(0, 400) || null,
+    }).catch(() => {});
+    return res.status(401).json({ success: false, message: 'That code is not right' });
+  }
+
+  if (fromRecovery) {
+    await notifyRoles(['owner'], `${staff.displayName} signed in with a recovery code.`, { event: 'recovery_code_used' });
+  }
+
+  await StaffLoginEvent.create({
+    staffUserId: staff.id, phone: staff.phone, outcome: 'success',
+    ipAddress: req.ip || null, userAgent: String(req.get('user-agent') || '').slice(0, 400) || null,
+  }).catch(() => {});
+  await staff.update({ lastLoginAt: new Date() });
+
+  res.json({
+    success: true,
+    data: {
+      token: signStaffToken(staff),
+      usedRecoveryCode: fromRecovery,
+      recoveryCodesLeft: (staff.twoFactorRecoveryCodes || []).length,
+      staff: {
+        id: staff.id, phone: staff.phone, displayName: staff.displayName, role: staff.role,
+        store: staff.store, profileImageUrl: staff.profileImageUrl,
+        tailorDepartment: staff.tailorDepartment, tailorGrade: staff.tailorGrade,
       },
     },
   });
@@ -210,10 +422,12 @@ router.get('/auth/me', asyncHandler(async (req, res) => {
   });
 }));
 
+// Lower case, like the brand everywhere else it is read. Numbers already
+// issued keep the form they were issued in.
 const invoiceNumber = () => {
   const year = new Date().getFullYear();
   const suffix = String(Math.floor(Math.random() * 90000) + 10000);
-  return `TWIF-${year}-${suffix}`;
+  return `twif-${year}-${suffix}`;
 };
 
 const trackingBaseUrl = () => (
@@ -1486,6 +1700,98 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       },
     },
   });
+}));
+
+// An invoice belongs to whoever raised it and to the people who run the shop.
+// A store manager may correct their own; only an Owner or Admin may remove one,
+// even one they raised themselves — a deleted invoice is a hole in the accounts.
+const mayEditInvoice = (staff, invoice) => (
+  ['owner', 'admin'].includes(staff?.role)
+  || (invoice.createdByName && invoice.createdByName === staff?.displayName)
+);
+
+router.patch('/invoices/:invoiceNumber', asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+  if (!mayEditInvoice(req.staff, invoice)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Only the person who raised this invoice, or an Owner or Admin, can change it',
+    });
+  }
+
+  const payload = invoice.payload || {};
+  const { items, notes, customerName, customerPhone, dueDate, storeCreditApplied } = req.body;
+
+  // Totals are worked out here rather than trusted from the browser, so an
+  // edited invoice cannot disagree with the sum of its own lines.
+  const nextItems = Array.isArray(items) ? items : payload.items || [];
+  const subtotal = nextItems.reduce((sum, item) => sum + (Number(item.rate || 0) * Number(item.quantity || 1)), 0);
+  const itemDiscounts = nextItems.reduce((sum, item) => {
+    const gross = Number(item.rate || 0) * Number(item.quantity || 1);
+    return sum + ((gross * Number(item.discountPercent || 0)) / 100);
+  }, 0);
+  const credit = storeCreditApplied === undefined ? Number(payload.storeCreditApplied || 0) : Number(storeCreditApplied);
+  const elite = Number(payload.eliteDiscountAmount || 0);
+  const balanceDue = Math.max(0, subtotal - itemDiscounts - elite - credit);
+
+  // An invoice cannot be edited below what has already been paid against it.
+  const paid = Number(payload.paid || 0);
+  if (paid > balanceDue) {
+    return res.status(409).json({
+      success: false,
+      message: `${naira(paid)} has already been paid against this invoice, so it cannot be reduced to ${naira(balanceDue)}`,
+    });
+  }
+
+  const nextPayload = {
+    ...payload,
+    items: nextItems,
+    ...(notes !== undefined ? { notes } : {}),
+    ...(dueDate !== undefined ? { dueDate } : {}),
+    storeCreditApplied: credit,
+    subtotal,
+    balanceDue,
+    editedBy: req.staff.displayName,
+    editedAt: new Date().toISOString(),
+  };
+
+  await invoice.update({
+    ...(customerName ? { customerName } : {}),
+    ...(customerPhone !== undefined ? { customerPhone } : {}),
+    total: balanceDue,
+    paymentStatus: paid <= 0 ? 'unpaid' : paid >= balanceDue ? 'fully_paid' : 'partial_paid',
+    payload: nextPayload,
+  });
+
+  await notifyRoles(['accounts', 'owner', 'admin'],
+    `${req.staff.displayName} edited invoice ${invoice.invoiceNumber}.`,
+    { invoiceNumber: invoice.invoiceNumber, event: 'invoice_edited' });
+
+  res.json({ success: true, data: { invoice: formatSentInvoice(invoice) } });
+}));
+
+router.delete('/invoices/:invoiceNumber', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+  const payload = invoice.payload || {};
+  // An order already being worked is not something to make disappear from
+  // under Production; it has to be stopped there first.
+  const sheetStatus = payload.orderSheet?.status;
+  if (sheetStatus && !['Order Sheet Confirmed'].includes(sheetStatus)) {
+    return res.status(409).json({
+      success: false,
+      message: `This order is already ${sheetStatus.toLowerCase()} in production. Stop it there before deleting the invoice.`,
+    });
+  }
+
+  await invoice.destroy();
+  await notifyRoles(['accounts', 'owner', 'admin'],
+    `${req.staff.displayName} deleted invoice ${invoice.invoiceNumber} for ${invoice.customerName}.`,
+    { event: 'invoice_deleted' });
+
+  res.json({ success: true, message: 'Invoice deleted' });
 }));
 
 // An order item can be worked by more than one tailor — a suit's jacket and

@@ -16,6 +16,23 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING(255),
       allowNull: false,
     },
+    // Two-factor sign-in, which the Admin role requires. The secret is what an
+    // authenticator app is set up with; it is never sent back to the browser
+    // once enrolment is confirmed.
+    twoFactorSecret: {
+      type: DataTypes.STRING(64),
+      allowNull: true,
+    },
+    twoFactorEnabledAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    // Hashed like a password, because a recovery code signs somebody in.
+    twoFactorRecoveryCodes: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: [],
+    },
     displayName: {
       type: DataTypes.STRING(120),
       allowNull: false,
