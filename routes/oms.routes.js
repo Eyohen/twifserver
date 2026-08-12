@@ -110,6 +110,8 @@ const knownStaffAccounts = {
   '08000000007': { pin: 'tailor26', displayName: 'Segun', role: 'tailor', store: 'production', tailorDepartment: 'suit', tailorGrade: 4 },
 };
 
+const naira = (amount) => Number(amount || 0).toLocaleString('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 });
+
 const verifiedStaffForProfile = async (phone, pin) => {
   let staffUser = await StaffUser.findOne({ where: { phone } });
   if (staffUser) {
@@ -838,6 +840,19 @@ router.patch('/customers/:id', asyncHandler(async (req, res) => {
     ? Object.fromEntries(Object.entries(bodyMeasurements).filter(([, value]) => String(value ?? '').trim()))
     : null;
 
+  // An elite tag turns on an automatic discount on every invoice the customer is
+  // sent, so only an Owner or Admin may give or take it away. A store manager
+  // saving the profile keeps whatever tier is already there.
+  const requestedCategory = customerType || category;
+  const isElite = (value) => /elite/i.test(String(value || ''));
+  const mayTagElite = ['owner', 'admin'].includes(req.staff?.role);
+  if (!mayTagElite && requestedCategory && isElite(requestedCategory) !== isElite(customer.category)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Only an Owner or Admin can change a customer\'s elite membership',
+    });
+  }
+
   // The Edit screen's status select is the other way to archive someone, and it
   // only ever wrote to the profile block — so the customer stayed in the list.
   const status = String(profile.status || '').trim();
@@ -985,6 +1000,17 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     });
   }
 
+  // A figure larger than the invoice is a mistake, not a credit.
+  const payableTotal = Number(payload.balanceDue || 0);
+  const requestedAmount = Number(req.body.amountReceived ?? payload.amountReceived ?? 0);
+  if (Number.isFinite(requestedAmount) && requestedAmount > payableTotal) {
+    return res.status(400).json({
+      success: false,
+      message: `That is more than the ${naira(payableTotal)} this invoice comes to`,
+    });
+  }
+  const amountAtCreation = Number.isFinite(requestedAmount) && requestedAmount > 0 ? requestedAmount : 0;
+
   const html = createTwifInvoiceHtml(payload);
   const invoiceRecord = {
     invoiceNumber: payload.invoiceNumber,
@@ -1001,6 +1027,20 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
       ...payload,
       recipientEmail,
       accountApprovalStatus: 'Pending Accounts',
+      // What the customer handed over as the invoice was raised. It used to be
+      // possible to mark an invoice part paid and record no figure at all,
+      // which left Accounts nothing to reconcile and production nothing to
+      // gate on.
+      paid: amountAtCreation,
+      ...(amountAtCreation > 0 ? {
+        paymentHistory: [{
+          amount: amountAtCreation,
+          method: payload.paymentMethod || 'Unspecified',
+          note: 'Recorded when the invoice was raised',
+          recordedBy: req.staff?.displayName || req.body.createdByName || 'Store Manager',
+          recordedAt: new Date().toISOString(),
+        }],
+      } : {}),
     },
   };
 
@@ -1135,7 +1175,7 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
   if (amount > payable) {
     return res.status(400).json({
       success: false,
-      message: `That is more than the ${payable.toLocaleString('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 })} owed on this invoice`,
+      message: `That is more than the ${naira(payable)} owed on this invoice`,
     });
   }
 
@@ -1163,7 +1203,7 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
   const refreshed = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
   await notifyRoles(
     ['store_manager', 'owner'],
-    `${req.staff.displayName} recorded ${amount.toLocaleString('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 })} against ${invoice.invoiceNumber}.`,
+    `${req.staff.displayName} recorded ${naira(amount)} against ${invoice.invoiceNumber}.`,
     { invoiceNumber: invoice.invoiceNumber, event: 'payment_recorded' },
   );
 
@@ -1322,10 +1362,25 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
 // as well as on screen: a rule that only the interface applies is a suggestion.
 const WORKING_STATUSES = ['Assigned', 'In Progress', 'Ready'];
 
-const productionBlockReason = (invoice, orderSheet) => {
+const productionBlockReason = (invoice, orderSheet, releasePercent = 70) => {
   const payload = invoice.payload || {};
   if (payload.accountApprovalStatus !== 'Approved') return 'Accounts have not approved this invoice yet';
-  if (invoice.paymentStatus === 'unpaid') return 'This invoice is unpaid, so it cannot go to production';
+
+  // Approval alone is not enough: enough of the money has to be in. Measured
+  // against what was actually recorded as received, not against the label on
+  // the invoice, so "part paid" with nothing behind it does not open the gate.
+  if (invoice.paymentStatus !== 'fully_paid') {
+    const payable = Math.max(0, Number(invoice.total || 0)
+      - Number(payload.eliteDiscountAmount || 0)
+      - Number(payload.storeCreditApplied || 0));
+    const received = Number(payload.paid || 0);
+    const percent = payable > 0 ? (received / payable) * 100 : 0;
+    if (percent < releasePercent) {
+      return received > 0
+        ? `Only ${Math.floor(percent)}% of this invoice has been paid — ${releasePercent}% is needed before production can start`
+        : `This invoice is unpaid — ${releasePercent}% is needed before production can start`;
+    }
+  }
 
   const details = orderSheet.measurementDetails;
   const hasFigures = details && typeof details === 'object'
@@ -1363,9 +1418,32 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       && nextOrderSheet.tailor !== previousOrderSheet.tailor);
 
   if (entersProduction) {
-    const blocked = productionBlockReason(invoice, nextOrderSheet);
-    if (blocked) return res.status(409).json({ success: false, message: blocked });
+    const settings = await readSetting(SETTINGS_KEY, {});
+    const releasePercent = Number(settings.paymentReleasePercent ?? DEFAULT_SETTINGS.paymentReleasePercent);
+    const blocked = productionBlockReason(invoice, nextOrderSheet, releasePercent);
+    if (blocked) {
+      // An Owner or Admin may send a held order through anyway, and the
+      // override is recorded against the sheet. Accounts may not: approving the
+      // invoice is their part, releasing it is not.
+      const mayOverride = ['owner', 'admin'].includes(req.staff?.role);
+      if (!req.body.overrideProductionHold || !mayOverride) {
+        return res.status(409).json({
+          success: false,
+          message: blocked,
+          data: { canOverride: mayOverride },
+        });
+      }
+      nextOrderSheet.productionOverride = {
+        reason: blocked,
+        by: req.staff.displayName,
+        at: new Date().toISOString(),
+      };
+      await notifyRoles(['owner', 'admin', 'accounts'],
+        `${req.staff.displayName} sent ${invoice.invoiceNumber} to production despite: ${blocked}.`,
+        { invoiceNumber: invoice.invoiceNumber, event: 'production_override' });
+    }
   }
+  delete nextOrderSheet.overrideProductionHold;
 
   await invoice.update({
     payload: {
@@ -1395,6 +1473,9 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   res.json({
     success: true,
     data: {
+      // The saved sheet comes back, so a caller that released a held order can
+      // see the override that was recorded against it.
+      orderSheet: nextOrderSheet,
       tracking: {
         trackingToken: req.params.token,
         trackingUrl: payload.trackingUrl || trackingUrlForToken(req.params.token),
@@ -1867,6 +1948,10 @@ const DEFAULT_SETTINGS = {
   lowStockThreshold: 5,
   currency: 'NGN',
   requirePaymentEvidence: true,
+  // How much of an invoice has to be paid before the order may be worked.
+  // Settled with Henry on 12 August: 70%, changeable here. The invoice asks the
+  // customer for 80% upfront, which leaves a little room above the gate.
+  paymentReleasePercent: 70,
   notifyOnLowStock: true,
   notifyOnNewInvoice: true,
 };
@@ -1906,7 +1991,9 @@ router.get('/settings', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { settings: { ...DEFAULT_SETTINGS, ...stored } } });
 }));
 
-router.put('/settings', asyncHandler(async (req, res) => {
+// Settings decide how the shop runs — the payment gate among them — so they
+// are the Owner's and Admin's to change, not any signed-in member of staff's.
+router.put('/settings', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
   const incoming = req.body || {};
   // Only known keys are stored, so the settings row cannot become a dumping
   // ground for whatever a client happens to post.
@@ -1919,6 +2006,12 @@ router.put('/settings', asyncHandler(async (req, res) => {
       if (typeof fallback === 'boolean') return [key, Boolean(value)];
       return [key, String(value ?? '').trim()];
     }));
+
+  // A release threshold outside 0–100 would either hold every order for ever or
+  // let every one through.
+  if ('paymentReleasePercent' in next) {
+    next.paymentReleasePercent = Math.min(100, Math.max(0, Math.round(next.paymentReleasePercent)));
+  }
 
   const current = await readSetting(SETTINGS_KEY, {});
   const settings = { ...DEFAULT_SETTINGS, ...current, ...next };

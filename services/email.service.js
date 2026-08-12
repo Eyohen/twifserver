@@ -5,7 +5,7 @@ const path = require('path');
 
 // Initialize Resend with API key
 const resend = new Resend(process.env.RESEND_API_KEY);
-const appName = process.env.APP_NAME || 'Twif';
+const appName = process.env.APP_NAME || 'twif';
 
 // Load and process email template
 const loadTemplate = async (templateName, variables = {}) => {

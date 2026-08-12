@@ -114,8 +114,17 @@ const createTwifInvoiceHtml = ({
     const quantity = Number(item.quantity ?? item.qty ?? 1);
     return sum + (rate * quantity);
   }, 0);
+  // Every deduction is shown, so the customer can follow the page from the line
+  // items down to the balance and get the same number.
+  const itemDiscountTotal = items.reduce((sum, item) => {
+    const rate = Number(item.rate ?? item.unitPrice ?? 0);
+    const quantity = Number(item.quantity ?? item.qty ?? 1);
+    const percent = Number(item.discountPercent ?? 0);
+    const flat = Number(item.discountAmount ?? 0);
+    return sum + (percent ? (rate * quantity * percent) / 100 : flat);
+  }, 0);
   const computedBalance = balanceDue ?? Math.max(
-    Number(computedSubtotal) - Number(eliteDiscountAmount) - Number(storeCreditApplied),
+    Number(computedSubtotal) - itemDiscountTotal - Number(eliteDiscountAmount) - Number(storeCreditApplied),
     0
   );
   const safeInvoiceNumber = escapeHtml(invoiceNumber || 'INV00000');
@@ -204,7 +213,7 @@ const createTwifInvoiceHtml = ({
                     <strong style="display:block;font-size:22px;color:#2a2a2a;letter-spacing:.08em;">${escapeHtml(BANK_DETAILS.accountNumber)}</strong>
                     <strong style="display:block;margin-top:8px;color:#2a2a2a;font-size:13px;">${escapeHtml(BANK_DETAILS.accountName)}</strong>
                     <span style="display:block;margin-top:5px;color:#777;font-size:13px;">${escapeHtml(BANK_DETAILS.bankName)}</span>
-                    <span style="display:block;margin-top:9px;color:#888;font-size:12px;line-height:1.55;">80% upfront or full payment required to start order.<br>Non-refundable.</span>
+                    <span style="display:block;margin-top:9px;color:#888;font-size:12px;line-height:1.55;">80% upfront or full payment is required to start an order.<br>Non-refundable.</span>
                   </td>
                 </tr>
               </table>
@@ -244,9 +253,15 @@ const createTwifInvoiceHtml = ({
                         <td style="padding:8px 0;color:#555;">Subtotal</td>
                         <td style="padding:8px 0;text-align:right;font-weight:800;">${formatNaira(computedSubtotal)}</td>
                       </tr>
+                      ${itemDiscountTotal > 0 ? `
+                        <tr>
+                          <td style="padding:8px 0;color:#555;">Item discounts</td>
+                          <td style="padding:8px 0;text-align:right;color:#c2453a;font-weight:800;">-${formatNaira(itemDiscountTotal)}</td>
+                        </tr>
+                      ` : ''}
                       ${Number(eliteDiscountAmount) > 0 ? `
                         <tr>
-                          <td style="padding:8px 0;color:#9a7830;font-weight:800;">★ 5% Elite Discount Applied</td>
+                          <td style="padding:8px 0;color:#9a7830;font-weight:800;">★ Elite Member Discount</td>
                           <td style="padding:8px 0;text-align:right;color:#c2453a;font-weight:800;">-${formatNaira(eliteDiscountAmount)}</td>
                         </tr>
                       ` : ''}
