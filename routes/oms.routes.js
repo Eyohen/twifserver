@@ -223,15 +223,20 @@ const requiresTwoFactor = (staff) => TWO_FACTOR_ROLES.includes(staff?.role);
 
 // A short-lived ticket that says "this person's PIN was right, now prove the
 // second factor". It is not a session: it cannot be used against the API.
+// Signed with the same secret as a session and with no fallback, exactly as
+// staffAuth does. A fallback would mean that if JWT_SECRET ever went missing
+// the ticket would be signed with a string sitting in this repository — and a
+// ticket is enough to enrol an authenticator on an Admin who has not set one
+// up yet, which is the whole account.
 const signTwoFactorTicket = (staff) => jwt.sign(
   { sub: staff.id, stage: 'awaiting_2fa' },
-  process.env.JWT_SECRET || 'twif-dev-secret',
+  process.env.JWT_SECRET,
   { expiresIn: '5m' }
 );
 
 const readTwoFactorTicket = (ticket) => {
   try {
-    const claims = jwt.verify(ticket, process.env.JWT_SECRET || 'twif-dev-secret');
+    const claims = jwt.verify(ticket, process.env.JWT_SECRET);
     return claims.stage === 'awaiting_2fa' ? claims.sub : null;
   } catch {
     return null;
