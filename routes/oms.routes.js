@@ -417,6 +417,11 @@ router.get('/auth/me', asyncHandler(async (req, res) => {
         profileImageUrl: staff.profileImageUrl,
         tailorDepartment: staff.tailorDepartment,
         tailorGrade: staff.tailorGrade,
+        // So the account screen can say whether two-factor is on and how many
+        // recovery codes are left, without ever handing back the secret.
+        twoFactorRequired: requiresTwoFactor(staff),
+        twoFactorEnabled: Boolean(staff.twoFactorEnabledAt),
+        recoveryCodesLeft: (staff.twoFactorRecoveryCodes || []).length,
       },
     },
   });
