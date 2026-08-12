@@ -1325,6 +1325,9 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
       ...(payload.orderSheet || {}),
       ...orderSheet,
       status: orderSheet.status || payload.orderSheet?.status || 'Order Sheet Confirmed',
+      // Kept from the first save, so lead time is measured from the day the
+      // order could have been worked rather than the day the invoice was sent.
+      createdAt: payload.orderSheet?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
   };
@@ -1483,6 +1486,123 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       },
     },
   });
+}));
+
+// An order item can be worked by more than one tailor — a suit's jacket and
+// trousers are rarely the same pair of hands — so assignment is per item and
+// holds a list. The top-level tailor is kept in step with the first of them,
+// because the board and the tracking page were built around a single name.
+const MAX_TAILORS_PER_ITEM = 4;
+
+const orderSheetOf = (invoice) => (invoice.payload || {}).orderSheet || {};
+
+const saveOrderSheet = async (invoice, orderSheet) => {
+  const payload = invoice.payload || {};
+  await invoice.update({ payload: { ...payload, orderSheet } });
+  return orderSheet;
+};
+
+router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Order not found' });
+
+  const sheet = orderSheetOf(invoice);
+  const items = Array.isArray(sheet.items) && sheet.items.length ? [...sheet.items] : [{ item: sheet.item || '' }];
+  const requested = Array.isArray(req.body?.items) ? req.body.items : [];
+
+  for (const entry of requested) {
+    const index = Number(entry.index);
+    if (!Number.isInteger(index) || index < 0 || index >= items.length) {
+      return res.status(400).json({ success: false, message: `There is no item ${index + 1} on this order` });
+    }
+    const names = [...new Set((entry.tailors || []).map((name) => String(name).trim()).filter(Boolean))];
+    if (names.length > MAX_TAILORS_PER_ITEM) {
+      return res.status(400).json({
+        success: false,
+        message: `An item can be shared between at most ${MAX_TAILORS_PER_ITEM} tailors`,
+      });
+    }
+    items[index] = {
+      ...items[index],
+      tailors: names,
+      ...(entry.tailorDueDate !== undefined ? { tailorDueDate: entry.tailorDueDate } : {}),
+    };
+  }
+
+  // Assigning anyone at all is entering production, so the same gate applies.
+  const nowAssigned = items.some((item) => (item.tailors || []).length);
+  if (nowAssigned) {
+    const settings = await readSetting(SETTINGS_KEY, {});
+    const releasePercent = Number(settings.paymentReleasePercent ?? DEFAULT_SETTINGS.paymentReleasePercent);
+    const blocked = productionBlockReason(invoice, sheet, releasePercent);
+    if (blocked && !sheet.productionOverride) {
+      return res.status(409).json({ success: false, message: blocked });
+    }
+  }
+
+  const everyone = [...new Set(items.flatMap((item) => item.tailors || []))];
+  const nextSheet = {
+    ...sheet,
+    items,
+    tailor: everyone[0] || 'Unassigned',
+    tailors: everyone,
+    status: everyone.length && sheet.status === 'Order Sheet Confirmed' ? 'Assigned' : sheet.status,
+    updatedAt: new Date().toISOString(),
+  };
+  await saveOrderSheet(invoice, nextSheet);
+
+  for (const name of everyone) {
+    await notifyRoles(['tailor'],
+      `You were assigned work on ${invoice.customerName}'s order (${invoice.invoiceNumber}).`,
+      { invoiceNumber: invoice.invoiceNumber, tailorName: name, event: 'tailor_assigned' });
+  }
+
+  res.json({ success: true, data: { orderSheet: nextSheet } });
+}));
+
+// The production manager marks each tailor's finished work out of ten. The
+// score belongs to the tailor and the item, not to the order as a whole.
+router.patch('/jobs/:invoiceNumber/scores', requireRole('production_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Order not found' });
+
+  const sheet = orderSheetOf(invoice);
+  if (!['Ready', 'Ready for Collection'].includes(sheet.status)) {
+    return res.status(409).json({
+      success: false,
+      message: 'Work can only be scored once it has been marked ready',
+    });
+  }
+
+  const items = Array.isArray(sheet.items) && sheet.items.length ? [...sheet.items] : [{ item: sheet.item || '' }];
+  const requested = Array.isArray(req.body?.scores) ? req.body.scores : [];
+
+  for (const entry of requested) {
+    const index = Number(entry.itemIndex);
+    const tailor = String(entry.tailor || '').trim();
+    const score = Number(entry.score);
+    if (!Number.isInteger(index) || index < 0 || index >= items.length) {
+      return res.status(400).json({ success: false, message: `There is no item ${index + 1} on this order` });
+    }
+    if (!tailor) return res.status(400).json({ success: false, message: 'Say which tailor the score is for' });
+    if (!Number.isFinite(score) || score < 0 || score > 10) {
+      return res.status(400).json({ success: false, message: 'A score runs from 0 to 10' });
+    }
+    if (!(items[index].tailors || []).includes(tailor)) {
+      return res.status(400).json({ success: false, message: `${tailor} did not work on item ${index + 1}` });
+    }
+    items[index] = {
+      ...items[index],
+      scores: {
+        ...(items[index].scores || {}),
+        [tailor]: { score, by: req.staff.displayName, at: new Date().toISOString() },
+      },
+    };
+  }
+
+  const nextSheet = { ...sheet, items, updatedAt: new Date().toISOString() };
+  await saveOrderSheet(invoice, nextSheet);
+  res.json({ success: true, data: { orderSheet: nextSheet } });
 }));
 
 // A job sheet's comment thread. Everyone who touches the job reads and writes
@@ -2157,6 +2277,49 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
     const phone = String(invoice.customerPhone || '').replace(/\D/g, '');
     return email || phone || invoice.customerName.toLowerCase();
   }));
+  // Lead time is the working life of an order: from the day the order sheet was
+  // raised to the day production marked it ready. Only finished orders count —
+  // an order still in the shop has no lead time yet, and counting it would make
+  // the figure improve every time nothing happened.
+  const leadTimeSetting = Number((await readSetting(SETTINGS_KEY, {})).productionLeadTimeWeeks
+    ?? DEFAULT_SETTINGS.productionLeadTimeWeeks);
+  const targetDays = leadTimeSetting * 7;
+
+  const completed = readyOrders.map((invoice) => {
+    const sheet = invoice.payload?.orderSheet || {};
+    const raised = new Date(sheet.createdAt || invoice.createdAt);
+    const finished = new Date(sheet.updatedAt || invoice.updatedAt);
+    const days = Math.max(0, Math.round((finished - raised) / 86400000));
+    return {
+      invoiceNumber: invoice.invoiceNumber,
+      customer: invoice.customerName,
+      days,
+      // Against the shop's own standard, and against what the customer was
+      // promised where a delivery date was given.
+      withinTarget: days <= targetDays,
+      promised: sheet.delivery || null,
+      onPromise: sheet.delivery ? finished <= new Date(`${sheet.delivery}T23:59:59`) : null,
+      finishedAt: finished.toISOString(),
+    };
+  });
+
+  const promised = completed.filter((order) => order.onPromise !== null);
+  const leadTime = {
+    targetDays,
+    completedCount: completed.length,
+    averageDays: completed.length
+      ? Number((completed.reduce((sum, order) => sum + order.days, 0) / completed.length).toFixed(1))
+      : null,
+    withinTargetPercent: completed.length
+      ? Math.round((completed.filter((order) => order.withinTarget).length / completed.length) * 100)
+      : null,
+    onPromisePercent: promised.length
+      ? Math.round((promised.filter((order) => order.onPromise).length / promised.length) * 100)
+      : null,
+    promisedCount: promised.length,
+    slowest: [...completed].sort((a, b) => b.days - a.days).slice(0, 5),
+  };
+
   const storeBreakdown = ['lekki', 'ikeja'].map((store) => {
     const storeInvoices = invoices.filter((invoice) => invoice.store === store);
     return {
@@ -2188,6 +2351,7 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
           staffAddedCount: staffUsers.filter((person) => person.createdAt >= startDate && person.createdAt <= endDate).length,
         },
         storeBreakdown,
+        leadTime,
         invoices: invoices.map((invoice) => ({
           invoiceNumber: invoice.invoiceNumber,
           date: invoice.createdAt,
