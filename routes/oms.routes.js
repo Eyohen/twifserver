@@ -530,6 +530,17 @@ const plainTextInvoice = (payload) => {
 
 const paymentStatusLabel = (status) => status === 'fully_paid' ? 'Fully Paid' : status === 'unpaid' ? 'Unpaid' : 'Partial Paid';
 
+// A caller sending the label rather than the key used to fall through to the
+// default and quietly become part paid, so a fully paid invoice was recorded —
+// and emailed to the customer — as owing money. Both forms are read now, and
+// anything genuinely unrecognised still lands on part paid.
+const normalisedPaymentStatus = (value) => {
+  const text = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (['fully_paid', 'paid', 'full'].includes(text)) return 'fully_paid';
+  if (['unpaid', 'not_paid', 'awaiting_payment'].includes(text)) return 'unpaid';
+  return 'partial_paid';
+};
+
 // Anything that was not Ready reported as In Progress, so a customer saw "In
 // Progress" from the moment their invoice was sent — before an order sheet
 // existed, before a tailor had been assigned, and before any work had started.
@@ -564,6 +575,10 @@ const formatSentInvoice = (invoice) => {
       : 'Transfer',
     orderStatus: invoice.orderStatus || paymentStatusLabel(invoice.paymentStatus),
     accountApprovalStatus: payload.accountApprovalStatus || 'Pending Accounts',
+    // The timeline showed a hollow marker and a dash whatever the invoice's
+    // state, because these never reached it.
+    accountApprovedAt: payload.accountApprovedAt || null,
+    accountApprovedBy: payload.accountApprovedBy || null,
     item: firstItem?.description || '',
     pieces: Number(firstItem?.quantity || 1),
     deliveryDate: payload.dueDate || payload.deliveryDate || '',
@@ -1248,7 +1263,7 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     createdByStaffId: req.staff?.id || null,
     createdByName: req.staff?.displayName || req.body.createdByName || 'Store Manager',
     total: Number(payload.balanceDue || 0),
-    paymentStatus: ['unpaid', 'partial_paid', 'fully_paid'].includes(payload.paymentStatus) ? payload.paymentStatus : 'partial_paid',
+    paymentStatus: normalisedPaymentStatus(payload.paymentStatus),
     emailStatus: 'failed',
     orderStatus: paymentStatusLabel(payload.paymentStatus),
     payload: {
@@ -1346,6 +1361,9 @@ router.patch('/invoices/:invoiceNumber/account-approval', asyncHandler(async (re
       accountApprovalStatus,
       accountApprovalNote: note,
       accountApprovedAt: accountApprovalStatus === 'Approved' ? new Date().toISOString() : null,
+      // Who decided, so the invoice's timeline can say more than that it
+      // happened.
+      accountApprovedBy: accountApprovalStatus === 'Approved' ? (req.staff?.displayName || null) : null,
     },
   });
 
@@ -1738,27 +1756,35 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
   }
 
   const payload = invoice.payload || {};
-  const { items, notes, customerName, customerPhone, dueDate, storeCreditApplied } = req.body;
+  const { items, notes, customerName, customerPhone, dueDate } = req.body;
 
-  // Totals are worked out here rather than trusted from the browser, so an
-  // edited invoice cannot disagree with the sum of its own lines.
-  const nextItems = Array.isArray(items) ? items : payload.items || [];
-  const subtotal = nextItems.reduce((sum, item) => sum + (Number(item.rate || 0) * Number(item.quantity || 1)), 0);
-  const itemDiscounts = nextItems.reduce((sum, item) => {
-    const gross = Number(item.rate || 0) * Number(item.quantity || 1);
-    return sum + ((gross * Number(item.discountPercent || 0)) / 100);
-  }, 0);
-  const credit = storeCreditApplied === undefined ? Number(payload.storeCreditApplied || 0) : Number(storeCreditApplied);
-  const elite = Number(payload.eliteDiscountAmount || 0);
-  const balanceDue = Math.max(0, subtotal - itemDiscounts - elite - credit);
+  // Settled with Henry on 13 August: what an invoice is *for* can be corrected,
+  // what it *comes to* cannot. So a description or a note can be rewritten, and
+  // the rate, quantity, discount and store credit behind each line are kept
+  // exactly as they were. The totals therefore never move, and an invoice that
+  // has already been paid against or approved cannot be quietly re-priced.
+  const existingItems = payload.items || [];
+  const nextItems = Array.isArray(items)
+    ? items.map((line, index) => {
+      const original = existingItems[index] || {};
+      return {
+        ...original,
+        description: String(line.description ?? original.description ?? '').trim(),
+        note: line.note !== undefined ? line.note : original.note,
+      };
+    })
+    : existingItems;
 
-  // An invoice cannot be edited below what has already been paid against it.
-  const paid = Number(payload.paid || 0);
-  if (paid > balanceDue) {
+  // Adding or removing a line would change what the invoice comes to, so the
+  // number of lines is fixed too.
+  if (Array.isArray(items) && items.length !== existingItems.length) {
     return res.status(409).json({
       success: false,
-      message: `${naira(paid)} has already been paid against this invoice, so it cannot be reduced to ${naira(balanceDue)}`,
+      message: 'Lines cannot be added or removed once an invoice has been sent — only their wording can be corrected',
     });
+  }
+  if (nextItems.some((line) => !line.description)) {
+    return res.status(400).json({ success: false, message: 'Every line needs a description' });
   }
 
   const nextPayload = {
@@ -1766,9 +1792,6 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
     items: nextItems,
     ...(notes !== undefined ? { notes } : {}),
     ...(dueDate !== undefined ? { dueDate } : {}),
-    storeCreditApplied: credit,
-    subtotal,
-    balanceDue,
     editedBy: req.staff.displayName,
     editedAt: new Date().toISOString(),
   };
@@ -1776,8 +1799,6 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
   await invoice.update({
     ...(customerName ? { customerName } : {}),
     ...(customerPhone !== undefined ? { customerPhone } : {}),
-    total: balanceDue,
-    paymentStatus: paid <= 0 ? 'unpaid' : paid >= balanceDue ? 'fully_paid' : 'partial_paid',
     payload: nextPayload,
   });
 
@@ -1793,6 +1814,17 @@ router.delete('/invoices/:invoiceNumber', requireRole('owner', 'admin'), asyncHa
   if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
 
   const payload = invoice.payload || {};
+
+  // Settled with Henry on 13 August: once Accounts have approved an invoice it
+  // is part of the books and cannot be deleted, by anyone. Correct it, or raise
+  // a credit against it.
+  if (payload.accountApprovalStatus === 'Approved') {
+    return res.status(409).json({
+      success: false,
+      message: 'Accounts have approved this invoice, so it can no longer be deleted',
+    });
+  }
+
   // An order already being worked is not something to make disappear from
   // under Production; it has to be stopped there first.
   const sheetStatus = payload.orderSheet?.status;
