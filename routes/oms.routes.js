@@ -562,7 +562,14 @@ const formatSentInvoice = (invoice) => {
     store: invoice.store === 'ikeja' ? 'Ikeja' : 'Lekki',
     createdBy: invoice.createdByName,
     createdByStaffId: invoice.createdByStaffId,
-    createdAt: new Intl.DateTimeFormat('en-GB', {
+    // The real timestamp. This used to be pre-formatted as "14 Aug 2026", which
+    // every date filter in the app then compared against an ISO date as a
+    // string — so "14 Aug 202" >= "2026-08-01" was false and the month and year
+    // counts silently undercounted, while the week count parsed the same string
+    // as a date and worked. A week could therefore hold more orders than a
+    // year, and orders raised today counted as none.
+    createdAt: (invoice.createdAt || new Date()).toISOString(),
+    createdAtLabel: new Intl.DateTimeFormat('en-GB', {
       day: '2-digit',
       month: 'short',
       year: 'numeric',
@@ -586,7 +593,19 @@ const formatSentInvoice = (invoice) => {
     trackingToken: payload.trackingToken || trackingTokenFromUrl(payload.trackingUrl),
     trackingUrl: payload.trackingUrl || (payload.trackingToken ? trackingUrlForToken(payload.trackingToken) : ''),
     orderSheet: payload.orderSheet || null,
-    paymentEvidence: payload.paymentEvidence || null,
+    // The image itself is not sent with the list. Payment evidence is a
+    // photograph of a transfer, and returning every one of them made this
+    // response 9.6 MB — fetched again on every change of view, which is what
+    // made the app take half a minute to open. The two screens that show one
+    // ask for it by invoice number.
+    paymentEvidence: payload.paymentEvidence
+      ? {
+        name: payload.paymentEvidence.name || 'Payment evidence',
+        type: payload.paymentEvidence.type || '',
+        size: payload.paymentEvidence.size || 0,
+        uploadedAt: payload.paymentEvidence.uploadedAt || null,
+      }
+      : null,
     // The full document fields, so an invoice can be re-rendered as a PDF or
     // resent from a list without first reopening the create screen.
     email: invoice.customerEmail || '',
@@ -2209,6 +2228,29 @@ router.get('/fabrics/:id', onlyItemIds, asyncHandler(async (req, res) => {
   });
 
   res.json({ success: true, data: { fabric, allocations } });
+}));
+
+// The photograph itself, asked for only when somebody opens the invoice. It
+// stays behind the session: this is a customer's bank transfer, not a product
+// picture, so it is not served the way fabric images are.
+router.get('/invoices/:invoiceNumber/payment-evidence', asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({
+    where: { invoiceNumber: req.params.invoiceNumber },
+    attributes: ['payload'],
+  });
+  const evidence = invoice?.payload?.paymentEvidence;
+  const match = IMAGE_DATA_URL.exec(evidence?.dataUrl || '');
+  const type = match?.[1].toLowerCase();
+  if (!type || !ALLOWED_IMAGE_TYPES.has(type)) {
+    return res.status(404).json({ success: false, message: 'No payment evidence for this invoice' });
+  }
+
+  res.set('Content-Type', type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.set('Content-Disposition', `inline; filename="${req.params.invoiceNumber}-evidence"`);
+  res.set('Cache-Control', 'private, max-age=300');
+  return res.send(Buffer.from(match[2].replace(/\s/g, ''), 'base64'));
 }));
 
 router.get('/fabrics/:id/image', asyncHandler(async (req, res) => {
