@@ -32,6 +32,9 @@ const configuredOrigins = [
 const allowedOrigins = new Set([
   'http://localhost:5173',
   'http://localhost:5174',
+  // `npm run verify` serves the built files here and checks every page renders
+  // before anything is pushed, so the built app has to be able to reach the API.
+  'http://localhost:4173',
   'https://twif.ng',
   'https://www.twif.ng',
   'https://twifinvoiceredesign2.netlify.app',
