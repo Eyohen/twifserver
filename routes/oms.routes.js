@@ -2280,13 +2280,34 @@ router.patch('/inventory-edit-requests/:id/review', requireRole('owner'), asyncH
   res.json({ success: true, data: { request, fabric } });
 }));
 
+// A garment can take more than one fabric — a shell and a lining, or two
+// colours — so an order sheet carries a list, each with its own quantity. One
+// fabric still works: it arrives as a list of one.
 router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
-  const { fabricId, quantity, trackingToken: token, tailorName } = req.body;
-  const amount = Number(quantity);
+  const { trackingToken: token, tailorName } = req.body;
 
-  if (!fabricId || !token || !tailorName || tailorName === 'Unassigned' || !Number.isFinite(amount) || amount <= 0) {
-    return res.status(400).json({ success: false, message: 'Fabric, assigned tailor, order sheet, and a positive usage quantity are required' });
+  // Either the list, or the single fabric the older callers send.
+  const requested = Array.isArray(req.body.fabrics) && req.body.fabrics.length
+    ? req.body.fabrics
+    : [{ fabricId: req.body.fabricId, quantity: req.body.quantity }];
+
+  const lines = requested
+    .filter((line) => line?.fabricId)
+    .map((line) => ({ fabricId: line.fabricId, amount: Number(line.quantity) }));
+
+  if (!token || !tailorName || tailorName === 'Unassigned' || !lines.length
+    || lines.some((line) => !Number.isFinite(line.amount) || line.amount <= 0)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Fabric, assigned tailor, order sheet, and a positive usage quantity are required',
+    });
   }
+
+  // The same fabric twice on one order is one deduction, not two.
+  const merged = [...lines.reduce((totals, line) => {
+    totals.set(line.fabricId, (totals.get(line.fabricId) || 0) + line.amount);
+    return totals;
+  }, new Map())].map(([fabricId, amount]) => ({ fabricId, amount }));
 
   const sourceInvoice = await findSentInvoiceByTrackingToken(token);
   if (!sourceInvoice) {
@@ -2295,17 +2316,7 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
 
   let allocationResult;
   await db.sequelize.transaction(async (transaction) => {
-    const [fabric, invoice] = await Promise.all([
-      Fabric.findByPk(fabricId, { transaction, lock: transaction.LOCK.UPDATE }),
-      SentInvoice.findByPk(sourceInvoice.id, { transaction, lock: transaction.LOCK.UPDATE }),
-    ]);
-
-    if (!fabric) {
-      const error = new Error('Inventory item not found');
-      error.status = 404;
-      throw error;
-    }
-
+    const invoice = await SentInvoice.findByPk(sourceInvoice.id, { transaction, lock: transaction.LOCK.UPDATE });
     const payload = invoice.payload || {};
     const orderSheet = payload.orderSheet || {};
     if (orderSheet.fabricAllocated) {
@@ -2314,52 +2325,83 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
       throw error;
     }
 
-    const available = Number(fabric.quantity || 0);
-    if (amount > available) {
-      const error = new Error(`Only ${available} ${fabric.unit} of ${fabric.name} is available`);
-      error.status = 400;
-      throw error;
+    // Every fabric is read and checked before any of them is deducted, so a
+    // shortfall on the second one cannot leave the first already taken.
+    const fabrics = [];
+    for (const line of merged) {
+      const fabric = await Fabric.findByPk(line.fabricId, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!fabric) {
+        const error = new Error('Inventory item not found');
+        error.status = 404;
+        throw error;
+      }
+      const available = Number(fabric.quantity || 0);
+      if (line.amount > available) {
+        const error = new Error(`Only ${available} ${fabric.unit} of ${fabric.name} is available`);
+        error.status = 400;
+        throw error;
+      }
+      fabrics.push({ fabric, amount: line.amount, remaining: available - line.amount });
     }
 
-    const remaining = available - amount;
-    await fabric.update({ quantity: remaining }, { transaction });
+    const allocated = [];
+    for (const entry of fabrics) {
+      await entry.fabric.update({ quantity: entry.remaining }, { transaction });
+      await InventoryAllocation.create({
+        fabricId: entry.fabric.id,
+        fabricName: entry.fabric.name,
+        quantity: entry.amount,
+        unit: entry.fabric.unit,
+        invoiceNumber: invoice.invoiceNumber,
+        customerName: invoice.customerName,
+        tailorName,
+        // Unique per row, and one order can now hold several.
+        trackingToken: `${token}:${entry.fabric.id}`,
+      }, { transaction });
+      allocated.push({
+        fabricId: entry.fabric.id,
+        name: entry.fabric.name,
+        unit: entry.fabric.unit,
+        quantity: entry.amount,
+      });
+    }
+
+    const [first] = fabrics;
     const nextOrderSheet = {
       ...orderSheet,
-      fabric: fabric.name,
-      fabricId: fabric.id,
-      fabricUsage: amount,
-      fabricUnit: fabric.unit,
+      // Everything that was taken, and the first mirrored onto the old fields
+      // the board and the tracking page still read.
+      fabricAllocations: allocated,
+      fabric: first.fabric.name,
+      fabricId: first.fabric.id,
+      fabricUsage: first.amount,
+      fabricUnit: first.fabric.unit,
       fabricAllocated: true,
       fabricAllocatedAt: new Date().toISOString(),
       tailor: tailorName,
     };
     await invoice.update({ payload: { ...payload, orderSheet: nextOrderSheet } }, { transaction });
-    await InventoryAllocation.create({
-      fabricId: fabric.id,
-      fabricName: fabric.name,
-      quantity: amount,
-      unit: fabric.unit,
-      invoiceNumber: invoice.invoiceNumber,
-      customerName: invoice.customerName,
-      tailorName,
-      trackingToken: token,
-    }, { transaction });
 
-    allocationResult = { fabric, orderSheet: nextOrderSheet, reachedThreshold: remaining <= Number(fabric.lowStockThreshold || 0) };
+    allocationResult = {
+      fabric: first.fabric,
+      allocated,
+      orderSheet: nextOrderSheet,
+      low: fabrics.filter((entry) => entry.remaining <= Number(entry.fabric.lowStockThreshold || 0)),
+    };
   });
 
-  if (allocationResult.reachedThreshold) {
+  for (const entry of allocationResult.low) {
     await notifyRoles(
       ['owner', 'admin'],
-      `${allocationResult.fabric.name} is at or below its low-stock threshold (${Number(allocationResult.fabric.quantity)} ${allocationResult.fabric.unit} remaining).`,
-      { fabricId: allocationResult.fabric.id, event: 'low_stock' }
+      `${entry.fabric.name} is at or below its low-stock threshold (${entry.remaining} ${entry.fabric.unit} remaining).`,
+      { fabricId: entry.fabric.id, event: 'low_stock' }
     );
   }
 
   await notifyRoles(
     ['inventory_manager'],
-    `${Number(allocationResult.orderSheet.fabricUsage)} ${allocationResult.fabric.unit} of ${allocationResult.fabric.name} was allocated to ${sourceInvoice.invoiceNumber}.`,
-    { fabricId: allocationResult.fabric.id, invoiceNumber: sourceInvoice.invoiceNumber, event: 'fabric_allocated' }
+    `${allocationResult.allocated.map((line) => `${line.quantity} ${line.unit} of ${line.name}`).join(', ')} was allocated to ${sourceInvoice.invoiceNumber}.`,
+    { invoiceNumber: sourceInvoice.invoiceNumber, event: 'fabric_allocated' }
   );
 
   res.json({ success: true, data: allocationResult });
