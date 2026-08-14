@@ -970,9 +970,13 @@ router.get('/customers', asyncHandler(async (req, res) => {
       category: customer.category || 'New',
       storeCreditBalance: Number(customer.storeCreditBalance || 0),
       measurementsAdded: Boolean(customer.measurements && Object.keys(customer.measurements).some((key) => key !== 'profile')),
+      // Website and the pipeline status ride here with the rest of the profile,
+      // which is a JSON block rather than columns — so a new field needs no
+      // migration to reach an environment.
       ...(customer.measurements?.profile || {}),
       measurements: customer.measurements || {},
       createdAt: customer.createdAt,
+      updatedAt: customer.updatedAt,
       invoices: [],
     };
     profiles.push(profile);
@@ -1038,6 +1042,12 @@ router.get('/customers', asyncHandler(async (req, res) => {
       twelveMonthSpend: recentInvoices.reduce((sum, invoice) => sum + Number(invoice.total || 0), 0),
       lifetimeSpend: profile.invoices.reduce((sum, invoice) => sum + Number(invoice.total || 0), 0),
       lastOrderAt: lastInvoice?.createdAt || null,
+      // The last time anything happened on this customer at all — an order, or
+      // a change to their own record. Derived rather than typed in, so it
+      // cannot go stale the way a hand-kept date does.
+      lastActivityAt: [lastInvoice?.createdAt, profile.updatedAt]
+        .filter(Boolean)
+        .sort((first, second) => new Date(second) - new Date(first))[0] || profile.createdAt,
       stores: [...new Set(profile.invoices.map((invoice) => invoice.store === 'ikeja' ? 'Ikeja' : 'Lekki'))],
       createdAt: profile.createdAt,
     };
@@ -1093,14 +1103,10 @@ router.patch('/customers/:id', asyncHandler(async (req, res) => {
     });
   }
 
-  // The Edit screen's status select is the other way to archive someone, and it
-  // only ever wrote to the profile block — so the customer stayed in the list.
-  const status = String(profile.status || '').trim();
-  const nextCategory = status === 'Archived'
-    ? 'Archived'
-    : (customer.category === 'Archived' && status && status !== 'Archived'
-      ? (customerType || category || 'Returning')
-      : (customerType || category || customer.category));
+  // Status is where a customer sits with the shop — Contact, Potential, Paying,
+  // Lost, Active, Periodic — and no longer has anything to do with archiving.
+  // Archiving is the Archive button's job, and only that.
+  const nextCategory = requestedCategory || customer.category;
 
   await customer.update({
     fullName: String(fullName).trim(),
