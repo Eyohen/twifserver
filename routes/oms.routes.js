@@ -124,6 +124,17 @@ const STAFF_ROLES = ['owner', 'admin', 'store_manager', 'accounts', 'production_
 const STAFF_STORES = ['all', 'lekki', 'ikeja', 'production'];
 const STAFF_STATUSES = ['active', 'inactive', 'deactivated'];
 
+// A date field left blank arrives as an empty string, which Sequelize turns
+// into the literal "Invalid date" and Postgres rejects — a 500 with a database
+// message, which is what met anyone trying to add a member of staff without a
+// date of birth.
+const dateOrNull = (value) => {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const at = new Date(text);
+  return Number.isNaN(at.valueOf()) ? null : text;
+};
+
 const readableList = (values) => values.map((value) => `"${value}"`).join(', ');
 
 // Returns a complaint, or nothing when the fields are ones the shop uses.
@@ -731,6 +742,8 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
       message: 'phone, pin, displayName, and role are required',
     });
   }
+  const birthDate = dateOrNull(dateOfBirth);
+
   const problem = staffFieldProblem({ role, store, status: req.body.status });
   if (problem) return res.status(400).json({ success: false, message: problem });
 
@@ -745,7 +758,7 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
     displayName,
     role,
     store,
-    dateOfBirth,
+    dateOfBirth: birthDate,
     tailorDepartment,
     tailorGrade,
   });
@@ -786,6 +799,8 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
   const updates = Object.fromEntries(allowedFields
     .filter((field) => Object.prototype.hasOwnProperty.call(requestedUpdates, field))
     .map((field) => [field, requestedUpdates[field] || null]));
+  if ('dateOfBirth' in updates) updates.dateOfBirth = dateOrNull(updates.dateOfBirth);
+
   // Editing a staff member hits the same columns, so it is checked the same way.
   const editProblem = staffFieldProblem(updates);
   if (editProblem) return res.status(400).json({ success: false, message: editProblem });
