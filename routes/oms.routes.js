@@ -117,6 +117,29 @@ const knownStaffAccounts = {
   '08000000007': { pin: 'tailor26', displayName: 'Segun', role: 'tailor', store: 'production', tailorDepartment: 'suit', tailorGrade: 4 },
 };
 
+// The values these columns actually accept. Sending anything else reached
+// Postgres and came back as "invalid input value for enum
+// enum_StaffUsers_store", which is not a sentence anybody should be shown.
+const STAFF_ROLES = ['owner', 'admin', 'store_manager', 'accounts', 'production_manager', 'inventory_manager', 'tailor'];
+const STAFF_STORES = ['all', 'lekki', 'ikeja', 'production'];
+const STAFF_STATUSES = ['active', 'inactive', 'deactivated'];
+
+const readableList = (values) => values.map((value) => `"${value}"`).join(', ');
+
+// Returns a complaint, or nothing when the fields are ones the shop uses.
+const staffFieldProblem = ({ role, store, status }) => {
+  if (role !== undefined && !STAFF_ROLES.includes(role)) {
+    return `"${role}" is not a role. Choose one of ${readableList(STAFF_ROLES)}.`;
+  }
+  if (store !== undefined && store !== null && !STAFF_STORES.includes(store)) {
+    return `"${store}" is not somewhere staff can be assigned. Choose one of ${readableList(STAFF_STORES)}.`;
+  }
+  if (status !== undefined && status !== null && !STAFF_STATUSES.includes(status)) {
+    return `"${status}" is not a staff status. Choose one of ${readableList(STAFF_STATUSES)}.`;
+  }
+  return null;
+};
+
 const naira = (amount) => Number(amount || 0).toLocaleString('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 });
 
 const verifiedStaffForProfile = async (phone, pin) => {
@@ -708,6 +731,9 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
       message: 'phone, pin, displayName, and role are required',
     });
   }
+  const problem = staffFieldProblem({ role, store, status: req.body.status });
+  if (problem) return res.status(400).json({ success: false, message: problem });
+
   if (role === 'tailor' && !tailorDepartment) {
     return res.status(400).json({ success: false, message: 'A department is required for tailor accounts' });
   }
@@ -760,6 +786,10 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
   const updates = Object.fromEntries(allowedFields
     .filter((field) => Object.prototype.hasOwnProperty.call(requestedUpdates, field))
     .map((field) => [field, requestedUpdates[field] || null]));
+  // Editing a staff member hits the same columns, so it is checked the same way.
+  const editProblem = staffFieldProblem(updates);
+  if (editProblem) return res.status(400).json({ success: false, message: editProblem });
+
   const resultingRole = updates.role || staffUser.role;
   const resultingDepartment = 'tailorDepartment' in updates ? updates.tailorDepartment : staffUser.tailorDepartment;
   if (!updates.displayName && Object.prototype.hasOwnProperty.call(updates, 'displayName')) {
