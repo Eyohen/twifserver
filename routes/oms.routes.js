@@ -532,6 +532,9 @@ const buildInvoiceHtmlPayload = (body = {}) => {
     eliteDiscountAmount: body.eliteDiscountAmount || 0,
     storeCreditApplied: body.storeCreditApplied || 0,
     balanceDue: body.balanceDue,
+    // What the customer has already handed over. Without it the invoice prints
+    // the whole sum as outstanding even when it is marked Fully Paid.
+    amountReceived: Number(body.amountReceived) || 0,
     paymentStatus: body.paymentStatus || 'partial_paid',
     paymentMethod: ['transfer', 'card', 'check', 'cash'].includes(body.paymentMethod) ? body.paymentMethod : 'transfer',
     trackingToken: token,
@@ -548,7 +551,15 @@ const plainTextInvoice = (payload) => {
     `Customer: ${payload.customer?.name || payload.customer?.fullName || 'Customer'}`,
     `Payment status: ${payload.paymentStatus === 'fully_paid' ? 'Fully Paid' : payload.paymentStatus === 'unpaid' ? 'Unpaid' : 'Partial Paid'}`,
     `Payment method: ${payload.paymentMethod.charAt(0).toUpperCase()}${payload.paymentMethod.slice(1)}`,
-    `Balance due: ₦${Number(payload.balanceDue || 0).toLocaleString('en-NG')}`,
+    // Outstanding, not the invoice total: this line told a customer who had
+    // paid in full that the whole amount was still due.
+    ...(() => {
+      const total = Number(payload.balanceDue || 0);
+      const paid = Math.min(Math.max(Number(payload.amountReceived) || 0, 0), total);
+      return paid > 0
+        ? [`Invoice total: ₦${total.toLocaleString('en-NG')}`, `Amount paid: ₦${paid.toLocaleString('en-NG')}`, `Balance due: ₦${(total - paid).toLocaleString('en-NG')}`]
+        : [`Balance due: ₦${total.toLocaleString('en-NG')}`];
+    })(),
     '',
     'Items:',
     ...(payload.items || []).map((item) => {
@@ -1319,8 +1330,16 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
       message: `That is more than the ${naira(payableTotal)} this invoice comes to`,
     });
   }
-  const amountAtCreation = Number.isFinite(requestedAmount) && requestedAmount > 0 ? requestedAmount : 0;
+  // Fully paid with no figure typed means the whole invoice was handed over.
+  // Without this the emailed invoice showed the full sum as still outstanding
+  // under a "Fully Paid" badge.
+  const amountAtCreation = Number.isFinite(requestedAmount) && requestedAmount > 0
+    ? requestedAmount
+    : (normalisedPaymentStatus(payload.paymentStatus) === 'fully_paid' ? payableTotal : 0);
 
+  // One payload for the document, the plain-text alternative and the record, so
+  // the three cannot disagree about what is still owed.
+  payload.amountReceived = amountAtCreation;
   const html = createTwifInvoiceHtml(payload);
   const invoiceRecord = {
     invoiceNumber: payload.invoiceNumber,

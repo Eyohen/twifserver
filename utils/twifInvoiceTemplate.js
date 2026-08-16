@@ -102,6 +102,7 @@ const createTwifInvoiceHtml = ({
   eliteDiscountAmount = 0,
   storeCreditApplied = 0,
   balanceDue,
+  amountReceived = 0,
   paymentStatus = 'partial_paid',
   paymentMethod = 'transfer',
   trackingUrl,
@@ -127,6 +128,11 @@ const createTwifInvoiceHtml = ({
     Number(computedSubtotal) - itemDiscountTotal - Number(eliteDiscountAmount) - Number(storeCreditApplied),
     0
   );
+  // `balanceDue` is what the invoice comes to, not what is left to pay — the
+  // money already received was never subtracted anywhere, so an invoice marked
+  // Fully Paid printed "Balance Due 150,000" beside the Fully Paid badge.
+  const amountPaid = Math.min(Math.max(Number(amountReceived) || 0, 0), computedBalance);
+  const outstanding = Math.max(computedBalance - amountPaid, 0);
   const safeInvoiceNumber = escapeHtml(invoiceNumber || 'INV00000');
   const storeLabel = escapeHtml(storeDetails.label);
   const safePaymentStatus = escapeHtml(paymentStatusLabel(paymentStatus));
@@ -147,7 +153,7 @@ const createTwifInvoiceHtml = ({
 </head>
 <body style="margin:0;padding:0;background:#e8e8e8;font-family:Inter,Arial,sans-serif;color:#2a2a2a;">
   <div style="display:none;overflow:hidden;line-height:1px;opacity:0;max-height:0;max-width:0;">
-    Invoice ${safeInvoiceNumber} from ${storeLabel}. Balance due ${formatNaira(computedBalance)}.
+    Invoice ${safeInvoiceNumber} from ${storeLabel}. ${outstanding > 0 ? `Balance due ${formatNaira(outstanding)}.` : `Paid in full — ${formatNaira(computedBalance)} received, thank you.`}
   </div>
 
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#e8e8e8;padding:28px 12px;">
@@ -187,8 +193,8 @@ const createTwifInvoiceHtml = ({
                       </tr>
                     </table>
                     <div style="display:inline-block;background:#171717;border-radius:6px;padding:14px 20px;text-align:center;">
-                      <p style="margin:0 0 7px;color:#a7a7a7;font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;">Balance Due</p>
-                      <strong style="color:#d3ab4f;font-size:26px;line-height:1;">${formatNaira(computedBalance)}</strong>
+                      <p style="margin:0 0 7px;color:#a7a7a7;font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;">${outstanding > 0 ? 'Balance Due' : 'Paid In Full'}</p>
+                      <strong style="color:#d3ab4f;font-size:26px;line-height:1;">${formatNaira(outstanding > 0 ? outstanding : computedBalance)}</strong>
                     </div>
                     <div style="margin-top:10px;text-align:right;">
                       <span style="display:inline-block;border:1px solid #d9b45a;border-radius:999px;background:#fff9e8;color:#8a6419;padding:6px 12px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;">${safePaymentStatus}</span>
@@ -271,11 +277,21 @@ const createTwifInvoiceHtml = ({
                           <td style="padding:8px 0;text-align:right;color:#c2453a;font-weight:800;">-${formatNaira(storeCreditApplied)}</td>
                         </tr>
                       ` : ''}
+                      ${amountPaid > 0 ? `
+                        <tr>
+                          <td style="padding:8px 0;color:#555;">Invoice total</td>
+                          <td style="padding:8px 0;text-align:right;font-weight:800;">${formatNaira(computedBalance)}</td>
+                        </tr>
+                        <tr>
+                          <td style="padding:8px 0;color:#2a7d4f;font-weight:800;">Amount paid</td>
+                          <td style="padding:8px 0;text-align:right;color:#2a7d4f;font-weight:800;">-${formatNaira(amountPaid)}</td>
+                        </tr>
+                      ` : ''}
                     </table>
                     <div style="height:2px;background:#202020;margin:8px 0 14px;"></div>
                     <div style="background:#171717;border-radius:6px;padding:16px;text-align:right;">
-                      <span style="display:inline-block;margin-right:12px;color:#a7a7a7;font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;">Balance Due · NGN</span>
-                      <strong style="color:#d3ab4f;font-size:28px;">${formatNaira(computedBalance)}</strong>
+                      <span style="display:inline-block;margin-right:12px;color:#a7a7a7;font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;">${outstanding > 0 ? 'Balance Due · NGN' : 'Paid In Full · NGN'}</span>
+                      <strong style="color:#d3ab4f;font-size:28px;">${formatNaira(outstanding > 0 ? outstanding : computedBalance)}</strong>
                     </div>
                   </td>
                 </tr>
