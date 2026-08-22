@@ -31,7 +31,11 @@ router.get('/install', (req, res) => {
   }
 
   const state = crypto.randomBytes(16).toString('hex');
-  res.cookie('shopify_oauth_state', state, { httpOnly: true, maxAge: 5 * 60 * 1000 });
+  res.cookie('shopify_oauth_state', state, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 5 * 60 * 1000,
+  });
 
   const url = buildAuthorizeUrl({
     shop,
@@ -47,6 +51,9 @@ router.get('/callback', asyncHandler(async (req, res) => {
   const secret = process.env.SHOPIFY_CLIENT_SECRET;
   if (!verifyOAuthHmac(req.query, secret)) {
     return res.status(401).json({ success: false, message: 'Invalid HMAC signature.' });
+  }
+  if (req.query.shop !== process.env.SHOPIFY_SHOP_DOMAIN) {
+    return res.status(403).json({ success: false, message: 'This app can only be installed on the configured shop.' });
   }
   if (!req.query.state || req.query.state !== req.cookies?.shopify_oauth_state) {
     return res.status(401).json({ success: false, message: 'Invalid or missing state parameter.' });
