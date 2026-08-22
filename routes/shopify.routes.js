@@ -18,7 +18,7 @@ const {
 } = require('../services/shopifySync.service');
 
 const router = express.Router();
-const { ShopifyStore } = db;
+const { ShopifyStore, ShopifySyncEvent, Customer, ShopifyOrder } = db;
 
 const SCOPES = 'read_customers,read_orders';
 
@@ -145,6 +145,32 @@ router.post('/webhooks/orders', requireWebhookSignature, asyncHandler(async (req
     });
   }
   res.status(200).send('ok');
+}));
+
+router.get('/sync-status', requireStaff, requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const [linkedCustomers, ordersSynced, lastEvent, recentEvents] = await Promise.all([
+    Customer.count({ where: { shopifyCustomerId: { [db.Sequelize.Op.ne]: null } } }),
+    ShopifyOrder.count(),
+    ShopifySyncEvent.findOne({ where: { result: 'success' }, order: [['createdAt', 'DESC']] }),
+    ShopifySyncEvent.findAll({ order: [['createdAt', 'DESC']], limit: 50 }),
+  ]);
+
+  res.json({
+    success: true,
+    data: {
+      linkedCustomers,
+      ordersSynced,
+      lastSyncAt: lastEvent?.createdAt || null,
+      recentEvents: recentEvents.map((event) => ({
+        type: event.type,
+        shopifyId: event.shopifyId,
+        result: event.result,
+        errorMessage: event.errorMessage,
+        payloadSummary: event.payloadSummary,
+        createdAt: event.createdAt,
+      })),
+    },
+  });
 }));
 
 module.exports = router;
