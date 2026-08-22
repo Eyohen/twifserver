@@ -7,9 +7,15 @@ const Encryption = require('../utils/encryption');
 const { requireStaff, requireRole } = require('../middleware/staffAuth');
 const {
   verifyOAuthHmac,
+  verifyWebhookHmac,
   buildAuthorizeUrl,
   exchangeCodeForToken,
 } = require('../utils/shopifyClient');
+const {
+  findOrCreateCustomerFromShopify,
+  upsertShopifyOrderFromShopify,
+  recordSyncEvent,
+} = require('../services/shopifySync.service');
 
 const router = express.Router();
 const { ShopifyStore } = db;
@@ -79,6 +85,66 @@ router.get('/callback', asyncHandler(async (req, res) => {
 
   res.clearCookie('shopify_oauth_state');
   res.send('Shopify app installed. You can close this tab.');
+}));
+
+const requireWebhookSignature = (req, res, next) => {
+  const hmacHeader = req.get('X-Shopify-Hmac-Sha256');
+  if (!verifyWebhookHmac(req.rawBody, hmacHeader, process.env.SHOPIFY_CLIENT_SECRET)) {
+    return res.status(401).json({ success: false, message: 'Invalid HMAC signature.' });
+  }
+  const dedupeKey = req.get('X-Shopify-Webhook-Id');
+  if (!dedupeKey) {
+    return res.status(400).json({ success: false, message: 'Missing X-Shopify-Webhook-Id header.' });
+  }
+  req.shopifyDedupeKey = dedupeKey;
+  return next();
+};
+
+router.post('/webhooks/customers', requireWebhookSignature, asyncHandler(async (req, res) => {
+  const payload = req.body;
+  try {
+    const customer = await findOrCreateCustomerFromShopify(payload);
+    await recordSyncEvent({
+      type: 'customer',
+      shopifyId: payload.id != null ? String(payload.id) : null,
+      dedupeKey: req.shopifyDedupeKey,
+      result: 'success',
+      payloadSummary: `${customer.fullName} (${customer.email || customer.phone || 'no contact info'})`,
+    });
+  } catch (error) {
+    await recordSyncEvent({
+      type: 'customer',
+      shopifyId: payload?.id != null ? String(payload.id) : null,
+      dedupeKey: req.shopifyDedupeKey,
+      result: 'error',
+      errorMessage: error.message,
+    });
+  }
+  res.status(200).send('ok');
+}));
+
+router.post('/webhooks/orders', requireWebhookSignature, asyncHandler(async (req, res) => {
+  const payload = req.body;
+  try {
+    const customer = await findOrCreateCustomerFromShopify(payload.customer || {});
+    const order = await upsertShopifyOrderFromShopify(payload, customer.id);
+    await recordSyncEvent({
+      type: 'order',
+      shopifyId: payload.id != null ? String(payload.id) : null,
+      dedupeKey: req.shopifyDedupeKey,
+      result: 'success',
+      payloadSummary: `Order ${order.orderNumber || order.shopifyOrderId} — ${order.financialStatus || 'unknown status'}`,
+    });
+  } catch (error) {
+    await recordSyncEvent({
+      type: 'order',
+      shopifyId: payload?.id != null ? String(payload.id) : null,
+      dedupeKey: req.shopifyDedupeKey,
+      result: 'error',
+      errorMessage: error.message,
+    });
+  }
+  res.status(200).send('ok');
 }));
 
 module.exports = router;
