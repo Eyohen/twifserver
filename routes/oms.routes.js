@@ -1117,13 +1117,19 @@ router.get('/customers', asyncHandler(async (req, res) => {
   // Archiving used to set the category and nothing else, so the customer came
   // straight back on the next load and the button looked broken.
   const includeArchived = String(req.query.includeArchived || '') === 'true';
-  const [customerRecords, sentInvoices, shopifyOrderRecords] = await Promise.all([
-    Customer.findAll({
-      where: includeArchived ? {} : { category: { [Op.ne]: 'Archived' } },
-      order: [['createdAt', 'DESC']],
-    }),
+  const customerRecords = await Customer.findAll({
+    where: includeArchived ? {} : { category: { [Op.ne]: 'Archived' } },
+    order: [['createdAt', 'DESC']],
+  });
+  const customerIds = customerRecords.map((customer) => customer.id);
+  const [sentInvoices, shopifyOrderRecords] = await Promise.all([
     SentInvoice.findAll({ order: [['createdAt', 'DESC']], limit: 500 }),
-    ShopifyOrder.findAll({ order: [['placedAt', 'DESC']], limit: 500 }),
+    customerIds.length
+      ? ShopifyOrder.findAll({
+        where: { customerId: { [Op.in]: customerIds } },
+        order: [['placedAt', 'DESC']],
+      })
+      : [],
   ]);
   const shopifyOrdersByCustomerId = new Map();
   shopifyOrderRecords.forEach((order) => {

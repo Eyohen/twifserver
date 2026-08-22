@@ -1,9 +1,10 @@
 'use strict';
 
 // An audit log of every webhook the OMS has processed — what the Admin
-// Sync panel reads from. dedupeKey is unique so a retried Shopify
-// delivery (same X-Shopify-Webhook-Id) can be recognised and skipped
-// rather than processed twice.
+// Sync panel reads from. dedupeKey is unique so a retried Shopify delivery
+// (same X-Shopify-Webhook-Id) fails to insert a second event row here, but
+// nothing currently reads that outcome to skip reprocessing — the retried
+// webhook's upsert still re-runs (safe, since it's idempotent).
 module.exports = (sequelize, DataTypes) => {
   const ShopifySyncEvent = sequelize.define('ShopifySyncEvent', {
     id: {

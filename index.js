@@ -248,6 +248,19 @@ const startServer = async () => {
       console.log(addedColumns.length
         ? `Schema check added missing columns: ${addedColumns.join(', ')}`
         : 'Schema check: no missing columns');
+
+      // DROP NOT NULL only ever loosens a constraint — it can never lose or
+      // corrupt an existing value, unlike the rename/retype/drop cases the
+      // "never alter columns" policy above exists to prevent. Customers.phone
+      // went from required to nullable in migration
+      // 20260822000002-make-customer-phone-nullable.js, which only ever runs
+      // via sequelize-cli — production's `node index.js` deploy path never
+      // invokes it, so this one-off, targeted check runs the same change here.
+      const customersTable = await queryInterface.describeTable('Customers').catch(() => null);
+      if (customersTable?.phone?.allowNull === false) {
+        await queryInterface.sequelize.query('ALTER TABLE "Customers" ALTER COLUMN "phone" DROP NOT NULL;');
+        console.log('Schema check: dropped NOT NULL on Customers.phone');
+      }
     }
 
     // Loads the Stores table into memory, seeding it with Lekki and Ikeja on

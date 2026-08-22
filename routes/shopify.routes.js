@@ -29,10 +29,10 @@ router.get('/install', (req, res) => {
   const appUrl = process.env.SHOPIFY_APP_URL;
   const clientId = process.env.SHOPIFY_CLIENT_ID;
 
-  if (!shop || !appUrl || !clientId) {
+  if (!shop || !appUrl || !clientId || !process.env.ENCRYPTION_KEY) {
     return res.status(500).json({
       success: false,
-      message: 'SHOPIFY_SHOP_DOMAIN, SHOPIFY_APP_URL and SHOPIFY_CLIENT_ID must be set to install.',
+      message: 'SHOPIFY_SHOP_DOMAIN, SHOPIFY_APP_URL, SHOPIFY_CLIENT_ID and ENCRYPTION_KEY must be set to install.',
     });
   }
 
@@ -112,21 +112,47 @@ router.post('/webhooks/customers', requireWebhookSignature, asyncHandler(async (
       payloadSummary: `${customer.fullName} (${customer.email || customer.phone || 'no contact info'})`,
     });
   } catch (error) {
-    await recordSyncEvent({
-      type: 'customer',
-      shopifyId: payload?.id != null ? String(payload.id) : null,
-      dedupeKey: req.shopifyDedupeKey,
-      result: 'error',
-      errorMessage: error.message,
-    });
+    // Both the ShopifySyncEvent columns above are STRING(500) — an
+    // unusually long error message would otherwise throw here too and
+    // escape as an unlogged 500, the opposite of this fallback's intent.
+    try {
+      await recordSyncEvent({
+        type: 'customer',
+        shopifyId: payload?.id != null ? String(payload.id) : null,
+        dedupeKey: req.shopifyDedupeKey,
+        result: 'error',
+        errorMessage: String(error.message).slice(0, 500),
+      });
+    } catch (loggingError) {
+      console.error('Failed to record Shopify customer sync error event:', loggingError);
+    }
+    // Shopify never retries a 200. The upserts and recordSyncEvent's
+    // dedupeKey handling are idempotent, so a retry (reusing the same
+    // X-Shopify-Webhook-Id) is safe — a 500 here is what makes Shopify
+    // retry a transient failure instead of silently losing the sync.
+    return res.status(500).send('error');
   }
   res.status(200).send('ok');
 }));
 
 router.post('/webhooks/orders', requireWebhookSignature, asyncHandler(async (req, res) => {
   const payload = req.body;
+  if (!payload.customer?.id) {
+    // Guest checkouts and many POS orders carry customer: null. Falling
+    // through to findOrCreateCustomerFromShopify would synthesize a
+    // shopifyCustomerId of the literal string "undefined", merging every
+    // guest order onto one shared phantom customer.
+    await recordSyncEvent({
+      type: 'order',
+      shopifyId: payload.id != null ? String(payload.id) : null,
+      dedupeKey: req.shopifyDedupeKey,
+      result: 'skipped',
+      payloadSummary: 'Guest/POS order with no linked Shopify customer — skipped',
+    });
+    return res.status(200).send('ok');
+  }
   try {
-    const customer = await findOrCreateCustomerFromShopify(payload.customer || {});
+    const customer = await findOrCreateCustomerFromShopify(payload.customer);
     const order = await upsertShopifyOrderFromShopify(payload, customer.id);
     await recordSyncEvent({
       type: 'order',
@@ -136,13 +162,18 @@ router.post('/webhooks/orders', requireWebhookSignature, asyncHandler(async (req
       payloadSummary: `Order ${order.orderNumber || order.shopifyOrderId} — ${order.financialStatus || 'unknown status'}`,
     });
   } catch (error) {
-    await recordSyncEvent({
-      type: 'order',
-      shopifyId: payload?.id != null ? String(payload.id) : null,
-      dedupeKey: req.shopifyDedupeKey,
-      result: 'error',
-      errorMessage: error.message,
-    });
+    try {
+      await recordSyncEvent({
+        type: 'order',
+        shopifyId: payload?.id != null ? String(payload.id) : null,
+        dedupeKey: req.shopifyDedupeKey,
+        result: 'error',
+        errorMessage: String(error.message).slice(0, 500),
+      });
+    } catch (loggingError) {
+      console.error('Failed to record Shopify order sync error event:', loggingError);
+    }
+    return res.status(500).send('error');
   }
   res.status(200).send('ok');
 }));

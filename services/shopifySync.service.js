@@ -5,6 +5,12 @@ const db = require('../models');
 
 const { Customer, ShopifyOrder, ShopifySyncEvent } = db;
 
+// Shopify normalizes phone numbers to E.164 (+2348012345678); this OMS
+// stores local format (08012345678). Comparing the last 10 digits matches
+// across both formats without touching how phone is stored/displayed
+// elsewhere in the app.
+const last10Digits = (phone) => String(phone || '').replace(/\D/g, '').slice(-10);
+
 const shopifyFullName = (shopifyCustomer) => {
   const name = [shopifyCustomer.first_name, shopifyCustomer.last_name]
     .filter(Boolean)
@@ -25,7 +31,13 @@ const findOrCreateCustomerFromShopify = async (shopifyCustomer) => {
 
   let customer = await Customer.findOne({ where: { shopifyCustomerId } });
   if (!customer && email) customer = await Customer.findOne({ where: { email } });
-  if (!customer && phone) customer = await Customer.findOne({ where: { phone } });
+  if (!customer && phone) {
+    const targetPhone = last10Digits(phone);
+    if (targetPhone) {
+      const candidates = await Customer.findAll({ where: { phone: { [db.Sequelize.Op.ne]: null } } });
+      customer = candidates.find((candidate) => last10Digits(candidate.phone) === targetPhone) || null;
+    }
+  }
 
   if (customer) {
     await customer.update({
@@ -48,11 +60,12 @@ const findOrCreateCustomerFromShopify = async (shopifyCustomer) => {
   } catch (error) {
     if (error.name !== 'SequelizeUniqueConstraintError') throw error;
 
-    // Phone unique index collided with a row not caught by the lookups
-    // above (e.g. matched on phone alone, but a race let another request
-    // create it first) — link to that existing customer instead of
-    // failing the whole sync.
-    const collided = phone ? await Customer.findOne({ where: { phone } }) : null;
+    // A unique index (shopifyCustomerId or phone) collided with a row not
+    // caught by the lookups above — a race let another concurrent webhook
+    // create it first. Link to that existing customer instead of failing
+    // the whole sync.
+    const collided = (await Customer.findOne({ where: { shopifyCustomerId } }))
+      || (phone ? await Customer.findOne({ where: { phone } }) : null);
     if (!collided) throw error;
 
     await collided.update({
@@ -96,9 +109,11 @@ const upsertShopifyOrderFromShopify = async (shopifyOrder, customerId) => {
 };
 
 // dedupeKey is unique at the DB level, so a retried webhook delivery (same
-// X-Shopify-Webhook-Id) throws a SequelizeUniqueConstraintError here rather
-// than being logged and processed a second time — the caller checks
-// `duplicate` before doing any further work.
+// X-Shopify-Webhook-Id) throws a SequelizeUniqueConstraintError here, which
+// is caught below and reported as { duplicate: true }. No caller currently
+// branches on that value — the retried webhook still re-runs the idempotent
+// upsert above it (safe, just not short-circuited), and only this second
+// sync-event insert is silently absorbed by the unique constraint.
 const recordSyncEvent = async ({ type, shopifyId, dedupeKey, result, errorMessage, payloadSummary }) => {
   try {
     await ShopifySyncEvent.create({ type, shopifyId, dedupeKey, result, errorMessage, payloadSummary });

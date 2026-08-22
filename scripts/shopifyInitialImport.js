@@ -17,6 +17,12 @@ const { fetchCustomersPage } = require('../utils/shopifyClient');
 const { findOrCreateCustomerFromShopify, recordSyncEvent } = require('../services/shopifySync.service');
 
 async function run() {
+  if (!process.env.ENCRYPTION_KEY) {
+    console.error('ENCRYPTION_KEY is not set. Refusing to run: without it this process would decrypt the stored access token with a different key than the one the server encrypted it with.');
+    process.exitCode = 1;
+    return;
+  }
+
   try {
     const store = await db.ShopifyStore.findOne({ where: { shopDomain: process.env.SHOPIFY_SHOP_DOMAIN } });
     if (!store) {

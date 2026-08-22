@@ -50,6 +50,7 @@ module.exports = (sequelize, DataTypes) => {
     shopifyCustomerId: {
       type: DataTypes.STRING(128),
       allowNull: true,
+      unique: true,
     },
   }, {
     tableName: 'Customers',
