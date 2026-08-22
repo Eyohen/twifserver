@@ -17,6 +17,7 @@ const bookingsRoutes = require('./routes/bookings.routes');
 const adminRoutes = require('./routes/admin.routes');
 const messageRoutes = require('./routes/message.routes');
 const omsRoutes = require('./routes/oms.routes');
+const shopifyRoutes = require('./routes/shopify.routes');
 const { refreshStoreCache } = require('./utils/storeDirectory');
 
 const app = express();
@@ -78,7 +79,14 @@ app.use(rateLimit({
   legacyHeaders: false,
 }));
 
-app.use(express.json({ limit: '10mb' }));
+// Shopify's webhook HMAC is computed over the exact raw bytes of the
+// request body — re-serialising req.body as JSON afterward isn't
+// guaranteed to reproduce them. This captures the raw buffer alongside
+// the normal parse, without changing behaviour for any existing route.
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(morgan(process.env.NODE_ENV === 'development' ? 'dev' : 'combined'));
@@ -127,6 +135,7 @@ app.use('/api/connections', connectionsRoutes);
 app.use('/api/opportunities', opportunitiesRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/bookings', bookingsRoutes);
+app.use('/api/oms/shopify', shopifyRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/oms', omsRoutes);
