@@ -36,14 +36,32 @@ const findOrCreateCustomerFromShopify = async (shopifyCustomer) => {
     return customer;
   }
 
-  return Customer.create({
-    fullName: shopifyFullName(shopifyCustomer),
-    email,
-    phone,
-    shopifyCustomerId,
-    category: 'New',
-    portalToken: crypto.randomBytes(32).toString('hex'),
-  });
+  try {
+    return await Customer.create({
+      fullName: shopifyFullName(shopifyCustomer),
+      email,
+      phone,
+      shopifyCustomerId,
+      category: 'New',
+      portalToken: crypto.randomBytes(32).toString('hex'),
+    });
+  } catch (error) {
+    if (error.name !== 'SequelizeUniqueConstraintError') throw error;
+
+    // Phone unique index collided with a row not caught by the lookups
+    // above (e.g. matched on phone alone, but a race let another request
+    // create it first) — link to that existing customer instead of
+    // failing the whole sync.
+    const collided = phone ? await Customer.findOne({ where: { phone } }) : null;
+    if (!collided) throw error;
+
+    await collided.update({
+      shopifyCustomerId,
+      email: collided.email || email,
+      phone: collided.phone || phone,
+    });
+    return collided;
+  }
 };
 
 // Summary only — no line items. Keyed on shopifyOrderId so re-delivery of
