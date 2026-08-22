@@ -15,7 +15,7 @@ const cloudinaryService = require('../services/cloudinary.service');
 const { signStaffToken, requireStaff, requireRole } = require('../middleware/staffAuth');
 
 const router = express.Router();
-const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment, StaffLoginEvent, Store } = db;
+const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment, StaffLoginEvent, Store, ShopifyOrder } = db;
 
 // The channel drives the category filter in the notification inbox, so it is
 // derived from the event rather than hardcoded.
@@ -1117,13 +1117,28 @@ router.get('/customers', asyncHandler(async (req, res) => {
   // Archiving used to set the category and nothing else, so the customer came
   // straight back on the next load and the button looked broken.
   const includeArchived = String(req.query.includeArchived || '') === 'true';
-  const [customerRecords, sentInvoices] = await Promise.all([
+  const [customerRecords, sentInvoices, shopifyOrderRecords] = await Promise.all([
     Customer.findAll({
       where: includeArchived ? {} : { category: { [Op.ne]: 'Archived' } },
       order: [['createdAt', 'DESC']],
     }),
     SentInvoice.findAll({ order: [['createdAt', 'DESC']], limit: 500 }),
+    ShopifyOrder.findAll({ order: [['placedAt', 'DESC']], limit: 500 }),
   ]);
+  const shopifyOrdersByCustomerId = new Map();
+  shopifyOrderRecords.forEach((order) => {
+    const list = shopifyOrdersByCustomerId.get(order.customerId) || [];
+    list.push({
+      orderNumber: order.orderNumber,
+      total: Number(order.total || 0),
+      currency: order.currency,
+      financialStatus: order.financialStatus,
+      fulfillmentStatus: order.fulfillmentStatus,
+      placedAt: order.placedAt,
+      shopifyAdminUrl: order.shopifyAdminUrl,
+    });
+    shopifyOrdersByCustomerId.set(order.customerId, list);
+  });
   const profiles = [];
   const phoneIndex = new Map();
   const emailIndex = new Map();
@@ -1194,6 +1209,7 @@ router.get('/customers', asyncHandler(async (req, res) => {
       // live at the top level; an early build nested a copy in here too.
       ...(({ measurements: _nested, ...rest }) => rest)(profile.measurements?.profile || {}),
       id: profile.id,
+      shopifyOrders: shopifyOrdersByCustomerId.get(profile.id) || [],
       fullName: profile.fullName,
       phone: profile.phone,
       email: profile.email,
