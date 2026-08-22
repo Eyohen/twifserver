@@ -8,13 +8,14 @@ const QRCode = require('qrcode');
 const multer = require('multer');
 const db = require('../models');
 const { createTwifInvoiceHtml, getTwifStoreDetails } = require('../utils/twifInvoiceTemplate');
+const { refreshStoreCache, listStores, storeKeys, normalizeStoreKey } = require('../utils/storeDirectory');
 const { sendEmail } = require('../services/email.service');
 const cloudinaryService = require('../services/cloudinary.service');
 
 const { signStaffToken, requireStaff, requireRole } = require('../middleware/staffAuth');
 
 const router = express.Router();
-const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment, StaffLoginEvent } = db;
+const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment, StaffLoginEvent, Store } = db;
 
 // The channel drives the category filter in the notification inbox, so it is
 // derived from the event rather than hardcoded.
@@ -121,7 +122,10 @@ const knownStaffAccounts = {
 // Postgres and came back as "invalid input value for enum
 // enum_StaffUsers_store", which is not a sentence anybody should be shown.
 const STAFF_ROLES = ['owner', 'admin', 'store_manager', 'accounts', 'production_manager', 'inventory_manager', 'tailor'];
-const STAFF_STORES = ['all', 'lekki', 'ikeja', 'production'];
+// 'all' (every store) and 'production' (not attached to one) are not real
+// stores, so they sit alongside whatever the Stores table currently holds
+// rather than living inside it.
+const staffStores = () => [...storeKeys(), 'all', 'production'];
 const STAFF_STATUSES = ['active', 'inactive', 'deactivated'];
 
 // A date field left blank arrives as an empty string, which Sequelize turns
@@ -142,8 +146,8 @@ const staffFieldProblem = ({ role, store, status }) => {
   if (role !== undefined && !STAFF_ROLES.includes(role)) {
     return `"${role}" is not a role. Choose one of ${readableList(STAFF_ROLES)}.`;
   }
-  if (store !== undefined && store !== null && !STAFF_STORES.includes(store)) {
-    return `"${store}" is not somewhere staff can be assigned. Choose one of ${readableList(STAFF_STORES)}.`;
+  if (store !== undefined && store !== null && !staffStores().includes(store)) {
+    return `"${store}" is not somewhere staff can be assigned. Choose one of ${readableList(staffStores())}.`;
   }
   if (status !== undefined && status !== null && !STAFF_STATUSES.includes(status)) {
     return `"${status}" is not a staff status. Choose one of ${readableList(STAFF_STATUSES)}.`;
@@ -597,6 +601,15 @@ const customerTrackingStatus = (status) => {
   return 'Order Received';
 };
 
+// The short, city-style name the invoice/customer screens already show
+// ("Lekki", not "Lekki Store" — that suffix is added by the JSX itself in a
+// few places, so adding it here too would print "Lekki Store Store").
+const storeShortLabel = (key) => {
+  const store = listStores().find((candidate) => candidate.key === key);
+  const name = store?.name || getTwifStoreDetails(key).label;
+  return name.replace(/\s+Store$/i, '') || name;
+};
+
 const formatSentInvoice = (invoice) => {
   const payload = invoice.payload || {};
   const firstItem = Array.isArray(payload.items) ? payload.items[0] : null;
@@ -604,7 +617,7 @@ const formatSentInvoice = (invoice) => {
   return {
     invoiceNumber: invoice.invoiceNumber,
     customer: invoice.customerName,
-    store: invoice.store === 'ikeja' ? 'Ikeja' : 'Lekki',
+    store: storeShortLabel(invoice.store),
     createdBy: invoice.createdByName,
     createdByStaffId: invoice.createdByStaffId,
     // The real timestamp. This used to be pre-formatted as "14 Aug 2026", which
@@ -718,7 +731,7 @@ router.get('/bootstrap', asyncHandler(async (req, res) => {
         fabricCount,
       },
       roles: ['owner', 'admin', 'store_manager', 'accounts', 'production_manager', 'inventory_manager', 'tailor'],
-      stores: ['ikeja', 'lekki'],
+      stores: storeKeys(),
     },
   });
 }));
@@ -726,14 +739,93 @@ router.get('/bootstrap', asyncHandler(async (req, res) => {
 router.get('/stores', (req, res) => {
   res.json({
     success: true,
-    data: {
-      stores: [
-        getTwifStoreDetails('lekki'),
-        getTwifStoreDetails('ikeja'),
-      ],
-    },
+    data: { stores: listStores() },
   });
 });
+
+const slugifyStoreKey = (value = '') => String(value)
+  .trim()
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, '-')
+  .replace(/(^-|-$)/g, '')
+  .slice(0, 40);
+
+router.post('/stores', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const { name, location, manager, phone, email, key: requestedKey } = req.body || {};
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ success: false, message: 'A store needs a name.' });
+  }
+
+  const key = slugifyStoreKey(requestedKey || name);
+  if (!key || ['all', 'production'].includes(key)) {
+    return res.status(400).json({ success: false, message: `"${name}" cannot be turned into a store key. Try a more specific name.` });
+  }
+
+  const clash = await Store.findOne({ where: { key } });
+  if (clash) {
+    return res.status(409).json({ success: false, message: `A store called "${clash.name}" already uses that name.` });
+  }
+
+  const store = await Store.create({
+    key,
+    name: String(name).trim(),
+    location: location ? String(location).trim() : null,
+    manager: manager ? String(manager).trim() : null,
+    phone: phone ? String(phone).trim() : null,
+    email: email ? String(email).trim() : null,
+    addressLines: location ? [String(location).trim()] : [],
+    status: 'active',
+  });
+  await refreshStoreCache();
+
+  res.status(201).json({ success: true, data: { store } });
+}));
+
+router.patch('/stores/:id', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const store = await Store.findByPk(req.params.id);
+  if (!store) return res.status(404).json({ success: false, message: 'Store not found.' });
+
+  const { name, location, manager, phone, email, status } = req.body || {};
+  if (status !== undefined && !['active', 'inactive'].includes(status)) {
+    return res.status(400).json({ success: false, message: 'Status must be "active" or "inactive".' });
+  }
+  if (name !== undefined && !String(name).trim()) {
+    return res.status(400).json({ success: false, message: 'A store needs a name.' });
+  }
+
+  await store.update({
+    ...(name !== undefined ? { name: String(name).trim() } : {}),
+    ...(location !== undefined ? { location, addressLines: location ? [location] : store.addressLines } : {}),
+    ...(manager !== undefined ? { manager } : {}),
+    ...(phone !== undefined ? { phone } : {}),
+    ...(email !== undefined ? { email } : {}),
+    ...(status !== undefined ? { status } : {}),
+  });
+  await refreshStoreCache();
+
+  res.json({ success: true, data: { store } });
+}));
+
+router.delete('/stores/:id', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const store = await Store.findByPk(req.params.id);
+  if (!store) return res.status(404).json({ success: false, message: 'Store not found.' });
+
+  const [invoiceCount, staffCount] = await Promise.all([
+    Invoice.count({ where: { store: store.key } }),
+    StaffUser.count({ where: { store: store.key } }),
+  ]);
+  if (invoiceCount || staffCount) {
+    return res.status(409).json({
+      success: false,
+      message: `${store.name} has ${invoiceCount} invoice${invoiceCount === 1 ? '' : 's'} and ${staffCount} staff member${staffCount === 1 ? '' : 's'} attached — turn it off instead of deleting it.`,
+    });
+  }
+
+  await store.destroy();
+  await refreshStoreCache();
+
+  res.json({ success: true });
+}));
 
 router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
   const {
@@ -1123,7 +1215,7 @@ router.get('/customers', asyncHandler(async (req, res) => {
       lastActivityAt: [lastInvoice?.createdAt, profile.updatedAt]
         .filter(Boolean)
         .sort((first, second) => new Date(second) - new Date(first))[0] || profile.createdAt,
-      stores: [...new Set(profile.invoices.map((invoice) => invoice.store === 'ikeja' ? 'Ikeja' : 'Lekki'))],
+      stores: [...new Set(profile.invoices.map((invoice) => storeShortLabel(invoice.store)))],
       createdAt: profile.createdAt,
     };
   }).sort((first, second) => new Date(second.lastOrderAt || second.createdAt) - new Date(first.lastOrderAt || first.createdAt));
@@ -1343,7 +1435,7 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   const html = createTwifInvoiceHtml(payload);
   const invoiceRecord = {
     invoiceNumber: payload.invoiceNumber,
-    store: payload.store === 'ikeja' ? 'ikeja' : 'lekki',
+    store: normalizeStoreKey(payload.store),
     customerName: payload.customer.name || payload.customer.fullName,
     customerEmail: recipientEmail,
     customerPhone: payload.customer.phone || null,
@@ -1565,7 +1657,7 @@ router.get('/track/:token', asyncHandler(async (req, res) => {
       tracking: {
         invoiceNumber: invoice.invoiceNumber,
         customer: invoice.customerName,
-        store: invoice.store === 'ikeja' ? 'Ikeja' : 'Lekki',
+        store: storeShortLabel(invoice.store),
         item: orderSheet.item || firstItem?.description || '',
         pieces: Number(orderSheet.pieces || firstItem?.quantity || 1),
         deliveryDate: orderSheet.delivery || payload.dueDate || '',
@@ -1603,7 +1695,7 @@ router.get('/track/:token/profile', asyncHandler(async (req, res) => {
     return {
       invoiceNumber: invoice.invoiceNumber,
       invoiceDate: payload.invoiceDate || invoice.createdAt,
-      store: invoice.store === 'ikeja' ? 'Ikeja' : 'Lekki',
+      store: storeShortLabel(invoice.store),
       total: Number(invoice.total || 0),
       balanceDue: Number(payload.balanceDue || 0),
       paymentStatus: paymentStatusLabel(invoice.paymentStatus),
@@ -2829,10 +2921,10 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
     slowest: [...completed].sort((a, b) => b.days - a.days).slice(0, 5),
   };
 
-  const storeBreakdown = ['lekki', 'ikeja'].map((store) => {
+  const storeBreakdown = storeKeys().map((store) => {
     const storeInvoices = invoices.filter((invoice) => invoice.store === store);
     return {
-      store: store === 'lekki' ? 'Lekki' : 'Ikeja',
+      store: storeShortLabel(store),
       invoices: storeInvoices.length,
       total: storeInvoices.reduce((sum, invoice) => sum + Number(invoice.total || 0), 0),
     };
@@ -2865,7 +2957,7 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
           invoiceNumber: invoice.invoiceNumber,
           date: invoice.createdAt,
           customer: invoice.customerName,
-          store: invoice.store === 'lekki' ? 'Lekki' : 'Ikeja',
+          store: storeShortLabel(invoice.store),
           total: Number(invoice.total || 0),
           paymentStatus: paymentStatusLabel(invoice.paymentStatus),
           paymentMethod: invoice.payload?.paymentMethod

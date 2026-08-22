@@ -41,8 +41,11 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.ENUM('owner', 'admin', 'store_manager', 'accounts', 'production_manager', 'inventory_manager', 'tailor'),
       allowNull: false,
     },
+    // A Store.key, or one of the two non-store sentinels 'all' (every store)
+    // and 'production' (not attached to a store at all) — so this stays a
+    // plain string rather than a foreign key into Stores.
     store: {
-      type: DataTypes.ENUM('ikeja', 'lekki', 'all', 'production'),
+      type: DataTypes.STRING(40),
       allowNull: false,
       defaultValue: 'all',
     },

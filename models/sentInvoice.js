@@ -12,8 +12,10 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       unique: true,
     },
+    // A Store.key — see the note on Invoice.store for why this is a plain
+    // string rather than a foreign key.
     store: {
-      type: DataTypes.ENUM('lekki', 'ikeja'),
+      type: DataTypes.STRING(40),
       allowNull: false,
     },
     customerName: {

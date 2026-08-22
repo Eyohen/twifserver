@@ -1,36 +1,11 @@
-const STORE_DETAILS = {
-  lekki: {
-    key: 'lekki',
-    label: 'Lekki Store',
-    addressLines: [
-      process.env.TWIF_LEKKI_ADDRESS_LINE_1 || 'Casa Kaysora Mall, Lekki Phase One, Lagos',
-      process.env.TWIF_LEKKI_ADDRESS_LINE_2 || 'Pavilion Heights, Issac John Street, Ikeja GRA',
-      process.env.TWIF_LEKKI_ADDRESS_LINE_3 || 'Opposite Radisson Hotel',
-    ],
-    phone: process.env.TWIF_LEKKI_PHONE || '+234 705 533 7410',
-    email: process.env.TWIF_LEKKI_EMAIL || 'twifclothing@gmail.com',
-  },
-  ikeja: {
-    key: 'ikeja',
-    label: 'Ikeja Store',
-    addressLines: [
-      process.env.TWIF_IKEJA_ADDRESS_LINE_1 || 'Pavilion Heights, Issac John Street, Ikeja GRA',
-      process.env.TWIF_IKEJA_ADDRESS_LINE_2 || 'Ikeja, Lagos',
-    ],
-    phone: process.env.TWIF_IKEJA_PHONE || '+234 705 533 7410',
-    email: process.env.TWIF_IKEJA_EMAIL || 'twifclothing@gmail.com',
-  },
-};
+// Store letterhead details now live in the Stores table, not here — see
+// utils/storeDirectory.js, which this file defers to via getTwifStoreDetails.
+const { getTwifStoreDetails } = require('./storeDirectory');
 
 const BANK_DETAILS = {
   accountNumber: process.env.TWIF_BANK_ACCOUNT_NUMBER || '5600520467',
   accountName: process.env.TWIF_BANK_ACCOUNT_NAME || 'The Way It Fits Clothing',
   bankName: process.env.TWIF_BANK_NAME || 'Fidelity Bank',
-};
-
-const normalizeStore = (store = 'lekki') => {
-  const key = String(store).trim().toLowerCase();
-  return STORE_DETAILS[key] ? key : 'lekki';
 };
 
 const escapeHtml = (value) => String(value ?? '')
@@ -63,8 +38,6 @@ const paymentStatusLabel = (value = 'partial_paid') => {
   if (status === 'unpaid') return 'Unpaid';
   return 'Partial Paid';
 };
-
-const getTwifStoreDetails = (store) => STORE_DETAILS[normalizeStore(store)];
 
 const buildRows = (items = []) => items.map((item, index) => {
   const rate = Number(item.rate ?? item.unitPrice ?? 0);
@@ -344,7 +317,6 @@ const createTwifInvoiceHtml = ({
 
 module.exports = {
   BANK_DETAILS,
-  STORE_DETAILS,
   createTwifInvoiceHtml,
   getTwifStoreDetails,
 };

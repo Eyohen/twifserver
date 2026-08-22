@@ -17,6 +17,7 @@ const bookingsRoutes = require('./routes/bookings.routes');
 const adminRoutes = require('./routes/admin.routes');
 const messageRoutes = require('./routes/message.routes');
 const omsRoutes = require('./routes/oms.routes');
+const { refreshStoreCache } = require('./utils/storeDirectory');
 
 const app = express();
 
@@ -239,6 +240,11 @@ const startServer = async () => {
         ? `Schema check added missing columns: ${addedColumns.join(', ')}`
         : 'Schema check: no missing columns');
     }
+
+    // Loads the Stores table into memory, seeding it with Lekki and Ikeja on
+    // a first boot or a database from before this table existed — the same
+    // self-healing the schema check above does for tables and columns.
+    await refreshStoreCache();
 
     app.listen(PORT, () => {
       console.log(`

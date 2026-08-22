@@ -12,8 +12,11 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       unique: true,
     },
+    // Which Store.key this invoice was raised under. Not a foreign key: a
+    // store that closes must not cascade into orphaning the invoices it
+    // already raised, so this stays a plain string against the Stores table.
     store: {
-      type: DataTypes.ENUM('ikeja', 'lekki'),
+      type: DataTypes.STRING(40),
       allowNull: false,
     },
     subtotal: {
