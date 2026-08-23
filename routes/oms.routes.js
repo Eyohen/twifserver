@@ -9,13 +9,14 @@ const multer = require('multer');
 const db = require('../models');
 const { createTwifInvoiceHtml, getTwifStoreDetails } = require('../utils/twifInvoiceTemplate');
 const { refreshStoreCache, listStores, storeKeys, normalizeStoreKey } = require('../utils/storeDirectory');
+const { refreshDepartmentCache, listDepartments } = require('../utils/departmentDirectory');
 const { sendEmail } = require('../services/email.service');
 const cloudinaryService = require('../services/cloudinary.service');
 
 const { signStaffToken, requireStaff, requireRole } = require('../middleware/staffAuth');
 
 const router = express.Router();
-const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment, StaffLoginEvent, Store, ShopifyOrder } = db;
+const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment, StaffLoginEvent, Store, Department, ShopifyOrder } = db;
 
 // The channel drives the category filter in the notification inbox, so it is
 // derived from the event rather than hardcoded.
@@ -825,6 +826,67 @@ router.delete('/stores/:id', requireRole('owner', 'admin'), asyncHandler(async (
   await refreshStoreCache();
 
   res.json({ success: true });
+}));
+
+router.get('/departments', (req, res) => {
+  res.json({
+    success: true,
+    data: { departments: listDepartments() },
+  });
+});
+
+const slugifyDepartmentKey = (value = '') => String(value)
+  .trim()
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, '-')
+  .replace(/(^-|-$)/g, '')
+  .slice(0, 40);
+
+router.post('/departments', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const { name, key: requestedKey } = req.body || {};
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ success: false, message: 'A department needs a name.' });
+  }
+
+  const key = slugifyDepartmentKey(requestedKey || name);
+  if (!key) {
+    return res.status(400).json({ success: false, message: `"${name}" cannot be turned into a department key. Try a more specific name.` });
+  }
+
+  const clash = await Department.findOne({ where: { key } });
+  if (clash) {
+    return res.status(409).json({ success: false, message: `A department called "${clash.name}" already uses that name.` });
+  }
+
+  const department = await Department.create({
+    key,
+    name: String(name).trim(),
+    status: 'active',
+  });
+  await refreshDepartmentCache();
+
+  res.status(201).json({ success: true, data: { department } });
+}));
+
+router.patch('/departments/:id', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const department = await Department.findByPk(req.params.id);
+  if (!department) return res.status(404).json({ success: false, message: 'Department not found.' });
+
+  const { name, status } = req.body || {};
+  if (status !== undefined && !['active', 'inactive'].includes(status)) {
+    return res.status(400).json({ success: false, message: 'Status must be "active" or "inactive".' });
+  }
+  if (name !== undefined && !String(name).trim()) {
+    return res.status(400).json({ success: false, message: 'A department needs a name.' });
+  }
+
+  await department.update({
+    ...(name !== undefined ? { name: String(name).trim() } : {}),
+    ...(status !== undefined ? { status } : {}),
+  });
+  await refreshDepartmentCache();
+
+  res.json({ success: true, data: { department } });
 }));
 
 router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
