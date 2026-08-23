@@ -32,6 +32,9 @@ const activeModelFiles = [
   'notification.js',
   'booking.js',
   'auditLog.js',
+  'shopifyStore.js',
+  'shopifyOrder.js',
+  'shopifySyncEvent.js',
 ];
 
 let sequelize;

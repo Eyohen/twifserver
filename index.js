@@ -17,6 +17,7 @@ const bookingsRoutes = require('./routes/bookings.routes');
 const adminRoutes = require('./routes/admin.routes');
 const messageRoutes = require('./routes/message.routes');
 const omsRoutes = require('./routes/oms.routes');
+const shopifyRoutes = require('./routes/shopify.routes');
 const { refreshStoreCache } = require('./utils/storeDirectory');
 
 const app = express();
@@ -78,7 +79,14 @@ app.use(rateLimit({
   legacyHeaders: false,
 }));
 
-app.use(express.json({ limit: '10mb' }));
+// Shopify's webhook HMAC is computed over the exact raw bytes of the
+// request body — re-serialising req.body as JSON afterward isn't
+// guaranteed to reproduce them. This captures the raw buffer alongside
+// the normal parse, without changing behaviour for any existing route.
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(morgan(process.env.NODE_ENV === 'development' ? 'dev' : 'combined'));
@@ -127,6 +135,7 @@ app.use('/api/connections', connectionsRoutes);
 app.use('/api/opportunities', opportunitiesRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/bookings', bookingsRoutes);
+app.use('/api/oms/shopify', shopifyRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/oms', omsRoutes);
@@ -239,6 +248,19 @@ const startServer = async () => {
       console.log(addedColumns.length
         ? `Schema check added missing columns: ${addedColumns.join(', ')}`
         : 'Schema check: no missing columns');
+
+      // DROP NOT NULL only ever loosens a constraint — it can never lose or
+      // corrupt an existing value, unlike the rename/retype/drop cases the
+      // "never alter columns" policy above exists to prevent. Customers.phone
+      // went from required to nullable in migration
+      // 20260822000002-make-customer-phone-nullable.js, which only ever runs
+      // via sequelize-cli — production's `node index.js` deploy path never
+      // invokes it, so this one-off, targeted check runs the same change here.
+      const customersTable = await queryInterface.describeTable('Customers').catch(() => null);
+      if (customersTable?.phone?.allowNull === false) {
+        await queryInterface.sequelize.query('ALTER TABLE "Customers" ALTER COLUMN "phone" DROP NOT NULL;');
+        console.log('Schema check: dropped NOT NULL on Customers.phone');
+      }
     }
 
     // Loads the Stores table into memory, seeding it with Lekki and Ikeja on

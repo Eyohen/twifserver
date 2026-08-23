@@ -13,7 +13,7 @@ module.exports = (sequelize, DataTypes) => {
     },
     phone: {
       type: DataTypes.STRING(32),
-      allowNull: false,
+      allowNull: true,
       unique: true,
     },
     email: {
@@ -50,6 +50,7 @@ module.exports = (sequelize, DataTypes) => {
     shopifyCustomerId: {
       type: DataTypes.STRING(128),
       allowNull: true,
+      unique: true,
     },
   }, {
     tableName: 'Customers',
@@ -58,6 +59,7 @@ module.exports = (sequelize, DataTypes) => {
 
   Customer.associate = function(models) {
     Customer.hasMany(models.Invoice, { foreignKey: 'customerId', as: 'invoices' });
+    Customer.hasMany(models.ShopifyOrder, { foreignKey: 'customerId', as: 'shopifyOrders' });
   };
 
   return Customer;

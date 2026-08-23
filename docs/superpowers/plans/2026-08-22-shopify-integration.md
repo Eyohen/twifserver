@@ -1418,8 +1418,8 @@ cd ../twif && git add src/pages/store-manager/CustomerProfilePage.jsx && git com
 ## What's left after this plan (manual, not code)
 
 1. Update the "tWIF Internal App" scopes in the Shopify Dev Dashboard to include `read_customers` and `read_orders` (currently only requests staff data).
-2. Set `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_APP_URL` in the real server environment (Railway).
+2. Set `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY` in the real server environment (Railway). `ENCRYPTION_KEY` must be the same value across every process (server and the bulk-import script) — otherwise each process generates its own random key and tokens encrypted by one become undecryptable by another.
 3. Visit `GET /api/oms/shopify/install` once, approve the grant — this stores the real access token.
-4. Register the four webhooks in the Shopify admin (`customers/create`, `customers/update`, `orders/create`, `orders/updated`, `orders/cancelled`, `refunds/create`), pointing at `https://<SHOPIFY_APP_URL>/api/oms/shopify/webhooks/customers` or `.../webhooks/orders` as appropriate.
+4. Register the five webhooks in the Shopify admin (`customers/create`, `customers/update`, `orders/create`, `orders/updated`, `orders/cancelled`), pointing at `https://<SHOPIFY_APP_URL>/api/oms/shopify/webhooks/customers` or `.../webhooks/orders` as appropriate. Do not register `refunds/create`: a refund payload's top-level `id` is the refund's own id (the order id is at `order_id`), and it carries no `customer`, `total_price`, or `financial_status` — routing it to `/webhooks/orders` would create a phantom `ShopifyOrder` row keyed on the refund id with `total: 0`. `orders/updated` already fires on a refund and carries the corrected `financial_status`, which is all the integration needs.
 5. Run `node scripts/shopifyInitialImport.js` once for the initial bulk import.
 6. The subdomain/DNS work connecting the Shopify-hosted domain to Railway (explicitly out of scope for this plan, per the spec).
