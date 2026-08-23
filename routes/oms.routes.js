@@ -1882,6 +1882,46 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
 // as well as on screen: a rule that only the interface applies is a suggestion.
 const WORKING_STATUSES = ['Assigned', 'In Progress', 'Ready'];
 
+// The six departments' construction/style fields, per the review doc.
+// "additionalInformation" is optional in every department; every other
+// key here is required before an item can go to production. Keys must
+// match twif/src/config/departmentFields.js exactly — a mismatch here
+// makes this check silently pass fields that are actually empty.
+const DEPARTMENT_REQUIRED_FIELDS = {
+  suit: ['fabricColor', 'suitStyle', 'gender', 'lapelFabric', 'lapelStyle', 'lapelWidth', 'pocketStyle', 'ventStyle', 'collarType', 'sbDb', 'sleeveType', 'handKnitting', 'buttonStyle'],
+  native: ['fabricColor', 'neckType', 'length', 'sleeveType', 'cuffType', 'chestPocketStyle', 'collarType', 'embroidery', 'embroideryType', 'collarButton', 'twifLogo', 'buttonType', 'liningType', 'collarSize', 'longSleeveType', 'slitType', 'slitLiningType', 'sidePocket', 'cap', 'capStyle'],
+  shirts: ['fabricColor', 'gender', 'buttonHoleStand', 'sleeveType', 'longSleeveType', 'cuffStyle', 'cuffType', 'collar', 'collarSize', 'embroidery', 'embroideryType', 'collarThickness', 'shirtEnd', 'beadingEmbellishment', 'buttonType'],
+  agbada: ['fabricColor', 'agbadaStyle', 'sleeveType', 'embroideryType', 'sleeveLining'],
+  design: ['fabricType', 'fabricColor', 'threadColor', 'embroideryLength', 'danshiki', 'trouser', 'cap'],
+  pants: ['fabricColor', 'pantType', 'gender', 'pleats', 'bandStyle', 'bandExtension', 'bandSize', 'beltlessType', 'sideStripe', 'backPocketStyle'],
+};
+
+const DEPARTMENT_LABELS = { suit: 'Suit', native: 'Native', shirts: 'Shirts', agbada: 'Agbada', design: 'Design', pants: 'Pants' };
+
+// Names every item that's missing its department tag or has empty required
+// fields for the department it's tagged with, so the block message tells
+// staff exactly what to fix instead of just "something is missing."
+const departmentBlockReason = (orderSheet) => {
+  const items = Array.isArray(orderSheet.items) ? orderSheet.items : [];
+  const problems = [];
+  items.forEach((item, index) => {
+    const label = item.item || `Item ${index + 1}`;
+    if (!item.department) {
+      problems.push(`${label} has no department assigned`);
+      return;
+    }
+    const required = DEPARTMENT_REQUIRED_FIELDS[item.department];
+    if (!required) return; // Unknown/newly-added department with no field list yet — nothing to enforce.
+    const fields = item.departmentFields || {};
+    const missing = required.filter((key) => !String(fields[key] ?? '').trim());
+    if (missing.length) {
+      const departmentLabel = DEPARTMENT_LABELS[item.department] || item.department;
+      problems.push(`${label} (${departmentLabel}) is missing: ${missing.join(', ')}`);
+    }
+  });
+  return problems.length ? problems.join('; ') : null;
+};
+
 const productionBlockReason = (invoice, orderSheet, releasePercent = 70) => {
   const payload = invoice.payload || {};
   if (payload.accountApprovalStatus !== 'Approved') return 'Accounts have not approved this invoice yet';
@@ -1908,6 +1948,10 @@ const productionBlockReason = (invoice, orderSheet, releasePercent = 70) => {
   if (!hasFigures && !String(orderSheet.measurements ?? '').trim()) {
     return 'This order has no measurements, so it cannot go to production';
   }
+
+  const departmentIssue = departmentBlockReason(orderSheet);
+  if (departmentIssue) return departmentIssue;
+
   return null;
 };
 
