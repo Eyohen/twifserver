@@ -1648,8 +1648,10 @@ router.get('/track/:token', asyncHandler(async (req, res) => {
   }
 
   const payload = invoice.payload || {};
-  const firstItem = Array.isArray(payload.items) ? payload.items[0] : null;
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const firstItem = items[0] || null;
   const orderSheet = payload.orderSheet || {};
+  const totalPieces = items.reduce((sum, line) => sum + Number(line.quantity || 1), 0);
 
   res.json({
     success: true,
@@ -1659,7 +1661,11 @@ router.get('/track/:token', asyncHandler(async (req, res) => {
         customer: invoice.customerName,
         store: storeShortLabel(invoice.store),
         item: orderSheet.item || firstItem?.description || '',
-        pieces: Number(orderSheet.pieces || firstItem?.quantity || 1),
+        items: items.map((line) => ({
+          description: line.description || line.name || 'Custom order',
+          quantity: Number(line.quantity || 1),
+        })),
+        pieces: Number(orderSheet.pieces || totalPieces || 1),
         deliveryDate: orderSheet.delivery || payload.dueDate || '',
         status: customerTrackingStatus(orderSheet.status),
         fabric: orderSheet.fabric || '',
@@ -1821,6 +1827,17 @@ const productionBlockReason = (invoice, orderSheet, releasePercent = 70) => {
   return null;
 };
 
+// An invoice belongs to whoever raised it and to the people who run the shop.
+// A store manager may correct their own; only an Owner or Admin may remove one,
+// even one they raised themselves — a deleted invoice is a hole in the accounts.
+const mayEditInvoice = (staff, invoice) => {
+  if (['owner', 'admin'].includes(staff?.role)) return true;
+  // Matched on the creator's id. Invoices raised before that was recorded have
+  // no id to match, and are the Owner's and Admin's to correct — a display name
+  // is not proof of anything, since two people can share one.
+  return Boolean(invoice.createdByStaffId) && invoice.createdByStaffId === staff?.id;
+};
+
 router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   const invoice = await findSentInvoiceByTrackingToken(req.params.token);
 
@@ -1828,6 +1845,15 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
     return res.status(404).json({
       success: false,
       message: 'Invoice tracking record not found',
+    });
+  }
+
+  // The order sheet lives on the invoice it belongs to, so the same
+  // creator-or-owner/admin rule that gates editing the invoice gates this too.
+  if (!mayEditInvoice(req.staff, invoice)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Only the person who raised this order, or an Owner or Admin, can change its order sheet',
     });
   }
 
@@ -1914,17 +1940,6 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
     },
   });
 }));
-
-// An invoice belongs to whoever raised it and to the people who run the shop.
-// A store manager may correct their own; only an Owner or Admin may remove one,
-// even one they raised themselves — a deleted invoice is a hole in the accounts.
-const mayEditInvoice = (staff, invoice) => {
-  if (['owner', 'admin'].includes(staff?.role)) return true;
-  // Matched on the creator's id. Invoices raised before that was recorded have
-  // no id to match, and are the Owner's and Admin's to correct — a display name
-  // is not proof of anything, since two people can share one.
-  return Boolean(invoice.createdByStaffId) && invoice.createdByStaffId === staff?.id;
-};
 
 router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_manager', 'accounts'), asyncHandler(async (req, res) => {
   const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
