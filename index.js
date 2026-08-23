@@ -19,6 +19,7 @@ const messageRoutes = require('./routes/message.routes');
 const omsRoutes = require('./routes/oms.routes');
 const shopifyRoutes = require('./routes/shopify.routes');
 const { refreshStoreCache } = require('./utils/storeDirectory');
+const { refreshDepartmentCache } = require('./utils/departmentDirectory');
 
 const app = express();
 
@@ -267,6 +268,7 @@ const startServer = async () => {
     // a first boot or a database from before this table existed — the same
     // self-healing the schema check above does for tables and columns.
     await refreshStoreCache();
+    await refreshDepartmentCache();
 
     app.listen(PORT, () => {
       console.log(`

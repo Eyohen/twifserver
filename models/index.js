@@ -12,6 +12,7 @@ const activeModelFiles = [
   'invoice.js',
   'orderSheet.js',
   'store.js',
+  'department.js',
   'fabric.js',
   'omsNotification.js',
   'inventoryAllocation.js',
