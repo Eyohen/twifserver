@@ -124,7 +124,7 @@ const createTwifInvoiceHtml = ({
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Twif Invoice ${safeInvoiceNumber}</title>
 </head>
-<body style="margin:0;padding:0;background:#e8e8e8;font-family:Inter,Arial,sans-serif;color:#2a2a2a;">
+<body style="margin:0;padding:0;background:#e8e8e8;font-family:Arial,Helvetica,sans-serif;color:#2a2a2a;letter-spacing:0.01px;">
   <div style="display:none;overflow:hidden;line-height:1px;opacity:0;max-height:0;max-width:0;">
     Invoice ${safeInvoiceNumber} from ${storeLabel}. ${outstanding > 0 ? `Balance due ${formatNaira(outstanding)}.` : `Paid in full — ${formatNaira(computedBalance)} received, thank you.`}
   </div>
