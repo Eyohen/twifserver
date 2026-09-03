@@ -1601,7 +1601,7 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   });
 }));
 
-router.patch('/invoices/:invoiceNumber/account-approval', asyncHandler(async (req, res) => {
+router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const { status = 'Approved', note = '' } = req.body;
   if (!['Approved', 'Flagged', 'Rejected'].includes(status)) {
     return res.status(400).json({ success: false, message: 'Status must be Approved, Flagged, or Rejected.' });
@@ -1618,6 +1618,27 @@ router.patch('/invoices/:invoiceNumber/account-approval', asyncHandler(async (re
   }
 
   const payload = invoice.payload || {};
+
+  // Approving releases an invoice toward production, so the money has to be
+  // there first. Measured against the same threshold, read from the same
+  // setting, that Production itself checks — so the two gates can't fall out
+  // of sync the way they did for INV59655 (approved while still Unpaid).
+  if (status === 'Approved' && invoice.paymentStatus !== 'fully_paid') {
+    const settings = await readSetting(SETTINGS_KEY, {});
+    const releasePercent = Number(settings.paymentReleasePercent ?? DEFAULT_SETTINGS.paymentReleasePercent);
+    const payable = Math.max(0, Number(invoice.total || 0));
+    const received = Number(payload.paid || 0);
+    const percent = payable > 0 ? (received / payable) * 100 : 0;
+    if (percent < releasePercent) {
+      return res.status(409).json({
+        success: false,
+        message: received > 0
+          ? `Only ${Math.floor(percent)}% of this invoice has been paid — ${releasePercent}% is needed before it can be approved`
+          : `This invoice is unpaid — ${releasePercent}% is needed before it can be approved`,
+      });
+    }
+  }
+
   const accountApprovalStatus = status;
 
   await invoice.update({
@@ -1678,20 +1699,30 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
   }
 
   const payload = invoice.payload || {};
-  const payable = Math.max(
-    0,
-    Number(invoice.total || 0) - Number(payload.eliteDiscountAmount || 0) - Number(payload.storeCreditApplied || 0),
-  );
+  // `invoice.total` is already net of the elite discount and store credit —
+  // both are applied once, when the invoice is raised — so subtracting them
+  // again here undercounted what was actually owed on any invoice carrying
+  // either one.
+  const payable = Math.max(0, Number(invoice.total || 0));
+  // A payment adds to what has already come in; it does not replace it. Two
+  // ₦20,000 payments against a ₦40,000 invoice used to leave the balance
+  // reading as though only the second payment had ever happened.
+  const alreadyPaid = Number(payload.paid || 0);
+  const remaining = Math.max(0, payable - alreadyPaid);
 
-  if (amount > payable) {
+  if (amount > remaining) {
     return res.status(400).json({
       success: false,
-      message: `That is more than the ${naira(payable)} owed on this invoice`,
+      message: `That is more than the ${naira(remaining)} still owed on this invoice`,
     });
   }
 
-  const paymentStatus = amount <= 0 ? 'unpaid' : amount >= payable ? 'fully_paid' : 'partial_paid';
+  const totalPaid = alreadyPaid + amount;
+  const paymentStatus = totalPaid <= 0 ? 'unpaid' : totalPaid >= payable ? 'fully_paid' : 'partial_paid';
   const method = String(req.body?.method || payload.paymentMethod || 'transfer');
+  // Evidence is optional on every payment, not just the first — a customer
+  // paying in instalments has a receipt for each one.
+  const evidence = req.body?.paymentEvidence || payload.paymentEvidence || null;
 
   // Each entry is kept, so how a balance was reached can be read back rather
   // than inferred from the total.
@@ -1701,6 +1732,7 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
       amount,
       method,
       note: String(req.body?.note || '').trim() || null,
+      hasEvidence: Boolean(req.body?.paymentEvidence),
       recordedBy: req.staff.displayName,
       recordedAt: new Date().toISOString(),
     },
@@ -1708,7 +1740,7 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
 
   await invoice.update({
     paymentStatus,
-    payload: { ...payload, paid: amount, paymentMethod: method, paymentHistory: history },
+    payload: { ...payload, paid: totalPaid, paymentMethod: method, paymentHistory: history, paymentEvidence: evidence },
   });
 
   const refreshed = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
@@ -1930,9 +1962,9 @@ const productionBlockReason = (invoice, orderSheet, releasePercent = 70) => {
   // against what was actually recorded as received, not against the label on
   // the invoice, so "part paid" with nothing behind it does not open the gate.
   if (invoice.paymentStatus !== 'fully_paid') {
-    const payable = Math.max(0, Number(invoice.total || 0)
-      - Number(payload.eliteDiscountAmount || 0)
-      - Number(payload.storeCreditApplied || 0));
+    // invoice.total is already net of the elite discount and store credit —
+    // subtracting them again here undercounted what was payable.
+    const payable = Math.max(0, Number(invoice.total || 0));
     const received = Number(payload.paid || 0);
     const percent = payable > 0 ? (received / payable) * 100 : 0;
     if (percent < releasePercent) {
@@ -2080,13 +2112,8 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
   }
 
   const payload = invoice.payload || {};
-  const { items, notes, customerName, customerPhone, dueDate } = req.body;
+  const { items, notes, customerName, customerPhone, customerEmail, store, dueDate } = req.body;
 
-  // Settled with Henry on 13 August: what an invoice is *for* can be corrected,
-  // what it *comes to* cannot. So a description or a note can be rewritten, and
-  // the rate, quantity, discount and store credit behind each line are kept
-  // exactly as they were. The totals therefore never move, and an invoice that
-  // has already been paid against or approved cannot be quietly re-priced.
   const existingItems = payload.items || [];
   const nextItems = Array.isArray(items)
     ? items.map((line, index) => {
@@ -2095,25 +2122,45 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
         ...original,
         description: String(line.description ?? original.description ?? '').trim(),
         note: line.note !== undefined ? line.note : original.note,
+        quantity: Math.max(0, Number(line.quantity ?? original.quantity ?? 1)),
+        rate: Math.max(0, Number(line.rate ?? original.rate ?? 0)),
+        discountPercent: Math.min(100, Math.max(0, Number(line.discountPercent ?? original.discountPercent ?? 0))),
       };
     })
     : existingItems;
 
-  // Adding or removing a line would change what the invoice comes to, so the
-  // number of lines is fixed too.
-  if (Array.isArray(items) && items.length !== existingItems.length) {
-    return res.status(409).json({
-      success: false,
-      message: 'Lines cannot be added or removed once an invoice has been sent — only their wording can be corrected',
-    });
+  if (!nextItems.length) {
+    return res.status(400).json({ success: false, message: 'An invoice needs at least one item' });
   }
   if (nextItems.some((line) => !line.description)) {
     return res.status(400).json({ success: false, message: 'Every line needs a description' });
   }
 
+  // The lines are the source of truth for what an invoice comes to; editing
+  // them recomputes the total rather than leaving it to disagree with its own
+  // items. The elite discount and store credit are not being edited here, so
+  // they carry forward unchanged.
+  const subtotal = nextItems.reduce((sum, line) => sum + (line.rate * line.quantity), 0);
+  const itemDiscountTotal = nextItems.reduce((sum, line) => sum + ((line.rate * line.quantity * line.discountPercent) / 100), 0);
+  const eliteDiscountAmount = Number(payload.eliteDiscountAmount || 0);
+  const storeCreditApplied = Number(payload.storeCreditApplied || 0);
+  const nextTotal = Math.max(0, subtotal - itemDiscountTotal - eliteDiscountAmount - storeCreditApplied);
+
+  // An invoice cannot be quietly re-priced to less than what has already been
+  // handed over against it — that would leave a payment with nothing behind it.
+  const alreadyPaid = Number(payload.paid || 0);
+  if (nextTotal < alreadyPaid) {
+    return res.status(409).json({
+      success: false,
+      message: `This invoice cannot be reduced below the ${naira(alreadyPaid)} already recorded as paid against it`,
+    });
+  }
+
   const nextPayload = {
     ...payload,
     items: nextItems,
+    subtotal,
+    balanceDue: nextTotal,
     ...(notes !== undefined ? { notes } : {}),
     ...(dueDate !== undefined ? { dueDate } : {}),
     editedBy: req.staff.displayName,
@@ -2123,6 +2170,9 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
   await invoice.update({
     ...(customerName ? { customerName } : {}),
     ...(customerPhone !== undefined ? { customerPhone } : {}),
+    ...(customerEmail ? { customerEmail } : {}),
+    ...(store ? { store } : {}),
+    total: nextTotal,
     payload: nextPayload,
   });
 
@@ -2208,12 +2258,17 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
     };
   }
 
-  // Assigning anyone at all is entering production, so the same gate applies.
-  const nowAssigned = items.some((item) => (item.tailors || []).length);
+  // Assigning anyone at all is entering production, so the same gate applies
+  // — but only for the item(s) actually being assigned. A missing department
+  // tag on some other item elsewhere on the order used to block assigning a
+  // tailor to this one, which had nothing to do with it.
+  const requestedIndexes = new Set(requested.map((entry) => Number(entry.index)));
+  const nowAssigned = items.some((item, index) => requestedIndexes.has(index) && (item.tailors || []).length);
   if (nowAssigned) {
     const settings = await readSetting(SETTINGS_KEY, {});
     const releasePercent = Number(settings.paymentReleasePercent ?? DEFAULT_SETTINGS.paymentReleasePercent);
-    const blocked = productionBlockReason(invoice, sheet, releasePercent);
+    const scopedSheet = { ...sheet, items: items.filter((_, index) => requestedIndexes.has(index)) };
+    const blocked = productionBlockReason(invoice, scopedSheet, releasePercent);
     if (blocked && !sheet.productionOverride) {
       return res.status(409).json({ success: false, message: blocked });
     }
