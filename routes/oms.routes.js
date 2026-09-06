@@ -545,7 +545,11 @@ const buildInvoiceHtmlPayload = (body = {}) => {
     trackingToken: token,
     trackingUrl: body.trackingUrl || trackingUrlForToken(token),
     notes: body.notes,
-    paymentEvidence: body.paymentEvidence || null,
+    // Normalised to an array from here on — a payment recorded later can add
+    // more evidence to the same invoice rather than replacing what came with it.
+    paymentEvidence: Array.isArray(body.paymentEvidence)
+      ? body.paymentEvidence.filter(Boolean)
+      : (body.paymentEvidence ? [body.paymentEvidence] : []),
   };
 };
 
@@ -657,14 +661,15 @@ const formatSentInvoice = (invoice) => {
     // response 9.6 MB — fetched again on every change of view, which is what
     // made the app take half a minute to open. The two screens that show one
     // ask for it by invoice number.
-    paymentEvidence: payload.paymentEvidence
-      ? {
-        name: payload.paymentEvidence.name || 'Payment evidence',
-        type: payload.paymentEvidence.type || '',
-        size: payload.paymentEvidence.size || 0,
-        uploadedAt: payload.paymentEvidence.uploadedAt || null,
-      }
-      : null,
+    paymentEvidence: (Array.isArray(payload.paymentEvidence)
+      ? payload.paymentEvidence
+      : (payload.paymentEvidence ? [payload.paymentEvidence] : [])
+    ).map((item) => ({
+      name: item.name || 'Payment evidence',
+      type: item.type || '',
+      size: item.size || 0,
+      uploadedAt: item.uploadedAt || null,
+    })),
     // The full document fields, so an invoice can be re-rendered as a PDF or
     // resent from a list without first reopening the create screen.
     email: invoice.customerEmail || '',
@@ -1689,9 +1694,16 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
 // The status follows the money rather than being set by hand: nothing received
 // is unpaid, part of it is part paid, all of it is fully paid. That matters
 // beyond bookkeeping, because an unpaid order is held out of production.
-router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner', 'admin'), asyncHandler(async (req, res) => {
+router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner', 'admin', 'store_manager'), asyncHandler(async (req, res) => {
   const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
   if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+  // A store manager may update payments only on invoices they themselves
+  // raised — the same rule already applied to editing an invoice's details.
+  // Accounts, Owner and Admin can record a payment against any invoice.
+  if (req.staff.role === 'store_manager' && invoice.createdByStaffId !== req.staff.id) {
+    return res.status(403).json({ success: false, message: 'You may only record payments on invoices you raised' });
+  }
 
   const amount = Number(req.body?.amountReceived);
   if (!Number.isFinite(amount) || amount < 0) {
@@ -1721,8 +1733,21 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
   const paymentStatus = totalPaid <= 0 ? 'unpaid' : totalPaid >= payable ? 'fully_paid' : 'partial_paid';
   const method = String(req.body?.method || payload.paymentMethod || 'transfer');
   // Evidence is optional on every payment, not just the first — a customer
-  // paying in instalments has a receipt for each one.
-  const evidence = req.body?.paymentEvidence || payload.paymentEvidence || null;
+  // paying in instalments has a receipt for each one. What's uploaded here
+  // adds to what is already on the invoice; it never replaces it, so proof
+  // from an earlier instalment is not lost when a later one is recorded.
+  const rawEvidence = Array.isArray(req.body?.paymentEvidence) ? req.body.paymentEvidence : [];
+  const newEvidence = rawEvidence
+    .filter((item) => item && safeImageDataUrl(item.dataUrl))
+    .map((item) => ({
+      name: String(item.name || 'Payment evidence').slice(0, 200),
+      type: String(item.type || ''),
+      size: Number(item.size || 0),
+      dataUrl: item.dataUrl,
+      uploadedAt: item.uploadedAt || new Date().toISOString(),
+    }));
+  const existingEvidence = Array.isArray(payload.paymentEvidence) ? payload.paymentEvidence : [];
+  const evidence = [...existingEvidence, ...newEvidence];
 
   // Each entry is kept, so how a balance was reached can be read back rather
   // than inferred from the total.
@@ -1732,7 +1757,8 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
       amount,
       method,
       note: String(req.body?.note || '').trim() || null,
-      hasEvidence: Boolean(req.body?.paymentEvidence),
+      hasEvidence: newEvidence.length > 0,
+      evidenceCount: newEvidence.length,
       recordedBy: req.staff.displayName,
       recordedAt: new Date().toISOString(),
     },
@@ -2587,12 +2613,14 @@ router.get('/fabrics/:id', onlyItemIds, asyncHandler(async (req, res) => {
 // The photograph itself, asked for only when somebody opens the invoice. It
 // stays behind the session: this is a customer's bank transfer, not a product
 // picture, so it is not served the way fabric images are.
-router.get('/invoices/:invoiceNumber/payment-evidence', asyncHandler(async (req, res) => {
+router.get('/invoices/:invoiceNumber/payment-evidence/:index', asyncHandler(async (req, res) => {
   const invoice = await SentInvoice.findOne({
     where: { invoiceNumber: req.params.invoiceNumber },
     attributes: ['payload'],
   });
-  const evidence = invoice?.payload?.paymentEvidence;
+  const evidenceList = Array.isArray(invoice?.payload?.paymentEvidence) ? invoice.payload.paymentEvidence : [];
+  const index = Number(req.params.index);
+  const evidence = Number.isInteger(index) ? evidenceList[index] : null;
   const match = IMAGE_DATA_URL.exec(evidence?.dataUrl || '');
   const type = match?.[1].toLowerCase();
   if (!type || !ALLOWED_IMAGE_TYPES.has(type)) {
@@ -2602,7 +2630,7 @@ router.get('/invoices/:invoiceNumber/payment-evidence', asyncHandler(async (req,
   res.set('Content-Type', type);
   res.set('X-Content-Type-Options', 'nosniff');
   res.set('Cross-Origin-Resource-Policy', 'cross-origin');
-  res.set('Content-Disposition', `inline; filename="${req.params.invoiceNumber}-evidence"`);
+  res.set('Content-Disposition', `inline; filename="${req.params.invoiceNumber}-evidence-${index}"`);
   res.set('Cache-Control', 'private, max-age=300');
   return res.send(Buffer.from(match[2].replace(/\s/g, ''), 'base64'));
 }));
