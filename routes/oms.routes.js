@@ -2013,6 +2013,33 @@ const productionBlockReason = (invoice, orderSheet, releasePercent = 70) => {
   return null;
 };
 
+// An order sheet is raised at the moment the customer's measurements are
+// whatever the shop has on file right then — nothing, on a shop that measures
+// afterwards, the ordinary way round. It is frozen there: nothing looks at
+// the customer's profile again once it has real figures on it, so the order
+// stayed blocked on "no measurements" forever even after the shop actually
+// measured them. Called wherever a sheet is about to be checked for entering
+// production, so a later measurement unblocks the same order it was taken
+// for, and is written onto the sheet itself so this only has to happen once.
+const measurementsFromCustomer = async (orderSheet) => {
+  const hasOwnFigures = orderSheet.measurementDetails && typeof orderSheet.measurementDetails === 'object'
+    && Object.values(orderSheet.measurementDetails).some((value) => String(value ?? '').trim());
+  if (hasOwnFigures || String(orderSheet.measurements ?? '').trim()) return null;
+  if (!orderSheet.customerId) return null;
+
+  const customer = await Customer.findByPk(orderSheet.customerId);
+  const stored = customer?.measurements || {};
+  const measurementDetails = Object.fromEntries(
+    Object.entries(stored).filter(([key, value]) => key !== 'profile' && String(value ?? '').trim())
+  );
+  if (!Object.keys(measurementDetails).length) return null;
+
+  const measurements = Object.entries(measurementDetails)
+    .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${value}`)
+    .join(', ');
+  return { measurementDetails, measurements };
+};
+
 // An invoice belongs to whoever raised it and to the people who run the shop.
 // A store manager may correct their own; only an Owner or Admin may remove one,
 // even one they raised themselves — a deleted invoice is a hole in the accounts.
@@ -2060,6 +2087,9 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       && nextOrderSheet.tailor !== previousOrderSheet.tailor);
 
   if (entersProduction) {
+    const measurementBackfill = await measurementsFromCustomer(nextOrderSheet);
+    if (measurementBackfill) Object.assign(nextOrderSheet, measurementBackfill);
+
     const settings = await readSetting(SETTINGS_KEY, {});
     const releasePercent = Number(settings.paymentReleasePercent ?? DEFAULT_SETTINGS.paymentReleasePercent);
     const blocked = productionBlockReason(invoice, nextOrderSheet, releasePercent);
@@ -2291,6 +2321,12 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
   const requestedIndexes = new Set(requested.map((entry) => Number(entry.index)));
   const nowAssigned = items.some((item, index) => requestedIndexes.has(index) && (item.tailors || []).length);
   if (nowAssigned) {
+    // Mutated directly onto `sheet`, not just the scoped copy below, so it is
+    // still there when `nextSheet` is built from `sheet` further down — the
+    // sheet only needs backfilling once, not on every assignment check.
+    const measurementBackfill = await measurementsFromCustomer(sheet);
+    if (measurementBackfill) Object.assign(sheet, measurementBackfill);
+
     const settings = await readSetting(SETTINGS_KEY, {});
     const releasePercent = Number(settings.paymentReleasePercent ?? DEFAULT_SETTINGS.paymentReleasePercent);
     const scopedSheet = { ...sheet, items: items.filter((_, index) => requestedIndexes.has(index)) };
