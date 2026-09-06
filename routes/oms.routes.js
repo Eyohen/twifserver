@@ -2061,17 +2061,28 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
     });
   }
 
-  // The order sheet lives on the invoice it belongs to, so the same
-  // creator-or-owner/admin rule that gates editing the invoice gates this too.
-  if (!mayEditInvoice(req.staff, invoice)) {
+  const payload = invoice.payload || {};
+  const previousOrderSheet = payload.orderSheet || {};
+
+  // This route is also how a Production Manager and a Tailor update a job's
+  // own status (fabric confirmed, in progress, ready) — not just how the
+  // order sheet's content gets corrected. The creator-or-owner/admin rule
+  // that gates editing that content refused both of them, since neither one
+  // raised the invoice: a Production Manager runs every job, not just ones
+  // they created, and a Tailor is only ever moving their own assigned job
+  // along, never editing what's on it.
+  const isProductionManager = req.staff?.role === 'production_manager';
+  const isAssignedTailor = req.staff?.role === 'tailor' && Boolean(req.staff?.displayName) && (
+    (Array.isArray(previousOrderSheet.tailors) && previousOrderSheet.tailors.includes(req.staff.displayName))
+    || previousOrderSheet.tailor === req.staff.displayName
+  );
+  if (!mayEditInvoice(req.staff, invoice) && !isProductionManager && !isAssignedTailor) {
     return res.status(403).json({
       success: false,
-      message: 'Only the person who raised this order, or an Owner or Admin, can change its order sheet',
+      message: 'Only the person who raised this order, an Owner or Admin, a Production Manager, or a tailor assigned to it can change its order sheet',
     });
   }
 
-  const payload = invoice.payload || {};
-  const previousOrderSheet = payload.orderSheet || {};
   const nextOrderSheet = {
     ...previousOrderSheet,
     ...req.body,
