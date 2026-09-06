@@ -2071,21 +2071,48 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   // raised the invoice: a Production Manager runs every job, not just ones
   // they created, and a Tailor is only ever moving their own assigned job
   // along, never editing what's on it.
+  const isPrivilegedEditor = mayEditInvoice(req.staff, invoice);
   const isProductionManager = req.staff?.role === 'production_manager';
   const isAssignedTailor = req.staff?.role === 'tailor' && Boolean(req.staff?.displayName) && (
     (Array.isArray(previousOrderSheet.tailors) && previousOrderSheet.tailors.includes(req.staff.displayName))
     || previousOrderSheet.tailor === req.staff.displayName
   );
-  if (!mayEditInvoice(req.staff, invoice) && !isProductionManager && !isAssignedTailor) {
+  if (!isPrivilegedEditor && !isProductionManager && !isAssignedTailor) {
     return res.status(403).json({
       success: false,
       message: 'Only the person who raised this order, an Owner or Admin, a Production Manager, or a tailor assigned to it can change its order sheet',
     });
   }
 
+  // A Tailor is trusted with moving their own job along, nothing more. The
+  // client always echoes back its whole local copy of the job (fabric, items,
+  // other tailors' assignments, everything) as the request body, so without
+  // this, anything sent under a tailor's session — not just what their own UI
+  // sends — would be applied wholesale by the merge below.
+  const TAILOR_ALLOWED_STATUSES = ['In Progress', 'Ready'];
+  const isTailorOnly = isAssignedTailor && !isPrivilegedEditor && !isProductionManager;
+  if (isTailorOnly && !TAILOR_ALLOWED_STATUSES.includes(req.body?.status)) {
+    return res.status(400).json({
+      success: false,
+      message: 'A tailor may only mark a job In Progress or Ready',
+    });
+  }
+
+  // A Production Manager legitimately needs broad access here — fabric,
+  // notes, due dates, and re-saving the sheet the assignments route just
+  // returned all pass through this same endpoint — but running production
+  // is still not a reason to move money or reassign whose invoice this is.
+  // Only the creator/Owner/Admin branch above may touch these.
+  const INVOICE_OWNED_FIELDS = ['paid', 'amount', 'customerId', 'customer', 'phone', 'store', 'invoiceNumber', 'trackingToken', 'trackingUrl', 'requiresAccountApproval', 'payment'];
+  const incomingChanges = isTailorOnly
+    ? { status: req.body.status }
+    : (isPrivilegedEditor
+      ? req.body
+      : Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => !INVOICE_OWNED_FIELDS.includes(key))));
+
   const nextOrderSheet = {
     ...previousOrderSheet,
-    ...req.body,
+    ...incomingChanges,
     updatedAt: new Date().toISOString(),
   };
 
