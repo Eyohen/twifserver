@@ -39,7 +39,7 @@ const paymentStatusLabel = (value = 'partial_paid') => {
   return 'Partial Paid';
 };
 
-const buildRows = (items = []) => items.map((item, index) => {
+const buildRows = (items = [], showDiscountColumn = true) => items.map((item, index) => {
   const rate = Number(item.rate ?? item.unitPrice ?? 0);
   const quantity = Number(item.quantity ?? item.qty ?? 1);
   const discount = Number(item.discountAmount ?? 0);
@@ -56,9 +56,11 @@ const buildRows = (items = []) => items.map((item, index) => {
       </td>
       <td style="padding:16px 14px;text-align:right;color:${hasFullDiscount ? '#888' : '#4a4a4a'};${hasFullDiscount ? 'text-decoration:line-through;' : ''}${stripe}">${formatNaira(rate)}</td>
       <td style="padding:16px 14px;text-align:center;color:#4a4a4a;${stripe}">${quantity}</td>
+      ${showDiscountColumn ? `
       <td style="padding:16px 14px;text-align:center;${stripe}">
         ${discountPercent ? `<span style="display:inline-block;background:#f7dede;color:#c2453a;border-radius:999px;padding:4px 10px;font-size:11px;font-weight:800;">${discountPercent}%</span>` : '<span style="color:#777;">—</span>'}
       </td>
+      ` : ''}
       <td style="padding:16px 14px;text-align:right;color:#2a2a2a;font-weight:800;${stripe}">${formatNaira(amount)}</td>
     </tr>
   `;
@@ -97,6 +99,9 @@ const createTwifInvoiceHtml = ({
     const flat = Number(item.discountAmount ?? 0);
     return sum + (percent ? (rate * quantity * percent) / 100 : flat);
   }, 0);
+  // No line was ever discounted, so the column has nothing to show but a
+  // column of dashes — leave it out of the table rather than print that.
+  const showDiscountColumn = items.some((item) => Number(item.discountPercent ?? 0) > 0 || Number(item.discountAmount ?? 0) > 0);
   const computedBalance = balanceDue ?? Math.max(
     Number(computedSubtotal) - itemDiscountTotal - Number(eliteDiscountAmount) - Number(storeCreditApplied),
     0
@@ -203,12 +208,12 @@ const createTwifInvoiceHtml = ({
                     <th align="left" style="padding:13px 14px;color:#ffffff;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Description</th>
                     <th align="right" style="padding:13px 14px;color:#ffffff;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Rate</th>
                     <th align="center" style="padding:13px 14px;color:#ffffff;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Qty</th>
-                    <th align="center" style="padding:13px 14px;color:#ffffff;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Discount</th>
+                    ${showDiscountColumn ? '<th align="center" style="padding:13px 14px;color:#ffffff;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Discount</th>' : ''}
                     <th align="right" style="padding:13px 14px;color:#ffffff;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Amount</th>
                   </tr>
                 </thead>
                 <tbody>
-                  ${buildRows(items)}
+                  ${buildRows(items, showDiscountColumn)}
                 </tbody>
               </table>
 

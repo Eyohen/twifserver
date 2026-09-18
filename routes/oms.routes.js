@@ -1634,12 +1634,18 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
     const payable = Math.max(0, Number(invoice.total || 0));
     const received = Number(payload.paid || 0);
     const percent = payable > 0 ? (received / payable) * 100 : 0;
-    if (percent < releasePercent) {
+    if (received <= 0) {
       return res.status(409).json({
         success: false,
-        message: received > 0
-          ? `Only ${Math.floor(percent)}% of this invoice has been paid — ${releasePercent}% is needed before it can be approved`
-          : `This invoice is unpaid — ${releasePercent}% is needed before it can be approved`,
+        message: `This invoice is unpaid — record a payment before it can be approved`,
+      });
+    }
+    // A partial payment under the threshold is a judgement call that belongs
+    // to the Owner or Admin, not to Accounts.
+    if (percent < releasePercent && !['owner', 'admin'].includes(req.staff?.role)) {
+      return res.status(403).json({
+        success: false,
+        message: `Only ${Math.floor(percent)}% of this invoice has been paid — a partial payment under ${releasePercent}% can only be approved by an Admin or Owner`,
       });
     }
   }
@@ -1964,18 +1970,29 @@ const departmentBlockReason = (orderSheet) => {
   const problems = [];
   items.forEach((item, index) => {
     const label = item.item || `Item ${index + 1}`;
-    if (!item.department) {
+    // A garment can now carry more than one department. Older order sheets,
+    // raised before that, still have a single `department` string instead —
+    // both are checked the same way.
+    const departmentKeys = Array.isArray(item.departments) && item.departments.length
+      ? item.departments
+      : (item.department ? [item.department] : []);
+    if (!departmentKeys.length) {
       problems.push(`${label} has no department assigned`);
       return;
     }
-    const required = DEPARTMENT_REQUIRED_FIELDS[item.department];
-    if (!required) return; // Unknown/newly-added department with no field list yet — nothing to enforce.
-    const fields = item.departmentFields || {};
-    const missing = required.filter((key) => !String(fields[key] ?? '').trim());
-    if (missing.length) {
-      const departmentLabel = DEPARTMENT_LABELS[item.department] || item.department;
-      problems.push(`${label} (${departmentLabel}) is missing: ${missing.join(', ')}`);
-    }
+    departmentKeys.forEach((departmentKey) => {
+      const required = DEPARTMENT_REQUIRED_FIELDS[departmentKey];
+      if (!required) return; // Unknown/newly-added department with no field list yet — nothing to enforce.
+      // Namespaced per department once an item can carry several; a single
+      // flat object on an older sheet that only ever had the one.
+      const rawFields = item.departmentFields || {};
+      const fields = (rawFields[departmentKey] && typeof rawFields[departmentKey] === 'object') ? rawFields[departmentKey] : rawFields;
+      const missing = required.filter((key) => !String(fields[key] ?? '').trim());
+      if (missing.length) {
+        const departmentLabel = DEPARTMENT_LABELS[departmentKey] || departmentKey;
+        problems.push(`${label} (${departmentLabel}) is missing: ${missing.join(', ')}`);
+      }
+    });
   });
   return problems.length ? problems.join('; ') : null;
 };
@@ -2380,6 +2397,9 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
     items,
     tailor: everyone[0] || 'Unassigned',
     tailors: everyone,
+    // Each item carries its own due date; the order-level one is the earliest
+    // of them, for the board and any older reader of the single field.
+    tailorDueDate: items.map((item) => item.tailorDueDate).filter(Boolean).sort()[0] || sheet.tailorDueDate || '',
     status: everyone.length && sheet.status === 'Order Sheet Confirmed' ? 'Assigned' : sheet.status,
     updatedAt: new Date().toISOString(),
   };
