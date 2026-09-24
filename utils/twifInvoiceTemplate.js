@@ -39,6 +39,12 @@ const paymentStatusLabel = (value = 'partial_paid') => {
   return 'Partial Paid';
 };
 
+// 'pos' reads as "Pos" under a plain capitalize-first-letter, not the
+// initialism store staff actually use.
+const paymentMethodLabel = (value = '') => (
+  String(value).toLowerCase() === 'pos' ? 'POS' : `${String(value).charAt(0).toUpperCase()}${String(value).slice(1)}`
+);
+
 const buildRows = (items = [], showDiscountColumn = true) => items.map((item, index) => {
   const rate = Number(item.rate ?? item.unitPrice ?? 0);
   const quantity = Number(item.quantity ?? item.qty ?? 1);
@@ -114,13 +120,15 @@ const createTwifInvoiceHtml = ({
   const safeInvoiceNumber = escapeHtml(invoiceNumber || 'INV00000');
   const storeLabel = escapeHtml(storeDetails.label);
   const safePaymentStatus = escapeHtml(paymentStatusLabel(paymentStatus));
-  const safePaymentMethod = escapeHtml(`${paymentMethod.charAt(0).toUpperCase()}${paymentMethod.slice(1)}`);
+  const safePaymentMethod = escapeHtml(paymentMethodLabel(paymentMethod));
   const safeTrackingUrl = escapeHtml(trackingUrl || '#');
   const defaultNotes = [
     'Your order will be ready in 3–4 weeks from date of payment and measurements.',
     validityText,
   ];
-  const displayNotes = notes.length ? notes : defaultNotes;
+  // A store manager's own note is additional context, not a replacement for
+  // the standard turnaround/validity notices — both belong on the invoice.
+  const displayNotes = [...defaultNotes, ...notes];
 
   return `<!doctype html>
 <html lang="en">

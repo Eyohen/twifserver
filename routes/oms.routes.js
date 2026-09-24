@@ -541,7 +541,7 @@ const buildInvoiceHtmlPayload = (body = {}) => {
     // the whole sum as outstanding even when it is marked Fully Paid.
     amountReceived: Number(body.amountReceived) || 0,
     paymentStatus: body.paymentStatus || 'partial_paid',
-    paymentMethod: ['transfer', 'card', 'check', 'cash'].includes(body.paymentMethod) ? body.paymentMethod : 'transfer',
+    paymentMethod: ['transfer', 'card', 'pos', 'check', 'cash'].includes(body.paymentMethod) ? body.paymentMethod : 'transfer',
     trackingToken: token,
     trackingUrl: body.trackingUrl || trackingUrlForToken(token),
     notes: body.notes,
@@ -559,7 +559,7 @@ const plainTextInvoice = (payload) => {
     `Store: ${getTwifStoreDetails(payload.store).label}`,
     `Customer: ${payload.customer?.name || payload.customer?.fullName || 'Customer'}`,
     `Payment status: ${payload.paymentStatus === 'fully_paid' ? 'Fully Paid' : payload.paymentStatus === 'unpaid' ? 'Unpaid' : 'Partial Paid'}`,
-    `Payment method: ${payload.paymentMethod.charAt(0).toUpperCase()}${payload.paymentMethod.slice(1)}`,
+    `Payment method: ${paymentMethodLabel(payload.paymentMethod)}`,
     // Outstanding, not the invoice total: this line told a customer who had
     // paid in full that the whole amount was still due.
     ...(() => {
@@ -583,6 +583,10 @@ const plainTextInvoice = (payload) => {
 };
 
 const paymentStatusLabel = (status) => status === 'fully_paid' ? 'Fully Paid' : status === 'unpaid' ? 'Unpaid' : 'Partial Paid';
+
+// 'pos' reads as "Pos" under a plain capitalize-first-letter, not the
+// initialism store staff actually use.
+const paymentMethodLabel = (method) => (method === 'pos' ? 'POS' : `${String(method).charAt(0).toUpperCase()}${String(method).slice(1)}`);
 
 // A caller sending the label rather than the key used to fall through to the
 // default and quietly become part paid, so a fully paid invoice was recorded —
@@ -640,9 +644,7 @@ const formatSentInvoice = (invoice) => {
     total: Number(invoice.total || 0),
     emailStatus: invoice.emailStatus === 'failed' ? 'Failed' : 'Sent',
     paymentStatus: paymentStatusLabel(invoice.paymentStatus),
-    paymentMethod: payload.paymentMethod
-      ? `${payload.paymentMethod.charAt(0).toUpperCase()}${payload.paymentMethod.slice(1)}`
-      : 'Transfer',
+    paymentMethod: payload.paymentMethod ? paymentMethodLabel(payload.paymentMethod) : 'Transfer',
     orderStatus: invoice.orderStatus || paymentStatusLabel(invoice.paymentStatus),
     accountApprovalStatus: payload.accountApprovalStatus || 'Pending Accounts',
     // The timeline showed a hollow marker and a dash whatever the invoice's
@@ -669,6 +671,7 @@ const formatSentInvoice = (invoice) => {
       type: item.type || '',
       size: item.size || 0,
       uploadedAt: item.uploadedAt || null,
+      note: item.note || '',
     })),
     // The full document fields, so an invoice can be re-rendered as a PDF or
     // resent from a list without first reopening the create screen.
@@ -1751,6 +1754,7 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
       size: Number(item.size || 0),
       dataUrl: item.dataUrl,
       uploadedAt: item.uploadedAt || new Date().toISOString(),
+      note: item.note ? String(item.note).slice(0, 500) : '',
     }));
   const existingEvidence = Array.isArray(payload.paymentEvidence) ? payload.paymentEvidence : [];
   const evidence = [...existingEvidence, ...newEvidence];
@@ -2223,7 +2227,35 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
   }
 
   const payload = invoice.payload || {};
-  const { items, notes, customerName, customerPhone, customerEmail, store, dueDate } = req.body;
+  const { items, notes, customerName, customerPhone, customerEmail, store, dueDate, removePaymentEvidenceAt, addPaymentEvidence } = req.body;
+
+  // Once Accounts have approved an invoice, its store and the evidence they
+  // approved against are part of the books — swapping either out from under
+  // that approval is the same problem deleting an approved invoice would be.
+  const changingStore = store !== undefined;
+  const changingEvidence = Array.isArray(removePaymentEvidenceAt) && removePaymentEvidenceAt.length
+    || Array.isArray(addPaymentEvidence) && addPaymentEvidence.length;
+  if (payload.accountApprovalStatus === 'Approved' && (changingStore || changingEvidence)) {
+    return res.status(409).json({
+      success: false,
+      message: 'Accounts have approved this invoice, so its store and payment evidence can no longer be changed',
+    });
+  }
+
+  const existingEvidence = Array.isArray(payload.paymentEvidence) ? payload.paymentEvidence : [];
+  const removeSet = new Set(Array.isArray(removePaymentEvidenceAt) ? removePaymentEvidenceAt.map(Number) : []);
+  const keptEvidence = existingEvidence.filter((_, index) => !removeSet.has(index));
+  const newEvidence = (Array.isArray(addPaymentEvidence) ? addPaymentEvidence : [])
+    .filter((item) => item && safeImageDataUrl(item.dataUrl))
+    .map((item) => ({
+      name: String(item.name || 'Payment evidence').slice(0, 200),
+      type: String(item.type || ''),
+      size: Number(item.size || 0),
+      dataUrl: item.dataUrl,
+      uploadedAt: item.uploadedAt || new Date().toISOString(),
+      note: item.note ? String(item.note).slice(0, 500) : '',
+    }));
+  const nextEvidence = [...keptEvidence, ...newEvidence];
 
   const existingItems = payload.items || [];
   const nextItems = Array.isArray(items)
@@ -2274,6 +2306,7 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
     balanceDue: nextTotal,
     ...(notes !== undefined ? { notes } : {}),
     ...(dueDate !== undefined ? { dueDate } : {}),
+    ...(changingEvidence ? { paymentEvidence: nextEvidence } : {}),
     editedBy: req.staff.displayName,
     editedAt: new Date().toISOString(),
   };
@@ -2282,7 +2315,7 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
     ...(customerName ? { customerName } : {}),
     ...(customerPhone !== undefined ? { customerPhone } : {}),
     ...(customerEmail ? { customerEmail } : {}),
-    ...(store ? { store } : {}),
+    ...(store ? { store: normalizeStoreKey(store) } : {}),
     total: nextTotal,
     payload: nextPayload,
   });
@@ -3280,9 +3313,7 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
           store: storeShortLabel(invoice.store),
           total: Number(invoice.total || 0),
           paymentStatus: paymentStatusLabel(invoice.paymentStatus),
-          paymentMethod: invoice.payload?.paymentMethod
-            ? `${invoice.payload.paymentMethod.charAt(0).toUpperCase()}${invoice.payload.paymentMethod.slice(1)}`
-            : 'Transfer',
+          paymentMethod: invoice.payload?.paymentMethod ? paymentMethodLabel(invoice.payload.paymentMethod) : 'Transfer',
           approvalStatus: invoice.payload?.accountApprovalStatus || 'Pending Accounts',
           orderStatus: invoice.payload?.orderSheet?.status || invoice.orderStatus,
         })),
