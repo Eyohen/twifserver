@@ -1154,16 +1154,20 @@ router.post('/customers', asyncHandler(async (req, res) => {
       message: 'fullName and phone are required',
     });
   }
-  if (!normalisedEmail(email)) {
-    return res.status(400).json({ success: false, message: 'An email address is required' });
-  }
-  if (!EMAIL_PATTERN.test(normalisedEmail(email))) {
+  // Email reaches the invoice and the tracking link to them, so it's worth
+  // having — but a store manager taking a phone order shouldn't be blocked
+  // from creating the customer over it. Other screens (Measurements, for
+  // one) already ask for it later, when it's actually needed.
+  const hasEmail = Boolean(normalisedEmail(email));
+  if (hasEmail && !EMAIL_PATTERN.test(normalisedEmail(email))) {
     return res.status(400).json({ success: false, message: 'Please enter a valid email address' });
   }
 
-  const clash = await findCustomerByEmail(email);
-  if (clash) {
-    return res.status(409).json({ success: false, message: `${clash.fullName} already uses ${clash.email}` });
+  if (hasEmail) {
+    const clash = await findCustomerByEmail(email);
+    if (clash) {
+      return res.status(409).json({ success: false, message: `${clash.fullName} already uses ${clash.email}` });
+    }
   }
 
   const existingPhone = await Customer.findOne({ where: { phone } });
@@ -1174,7 +1178,7 @@ router.post('/customers', asyncHandler(async (req, res) => {
   const customer = await Customer.create({
     fullName,
     phone,
-    email: String(email).trim(),
+    email: hasEmail ? String(email).trim() : null,
     category,
     measurements,
     portalToken: crypto.randomBytes(32).toString('hex'),
@@ -1481,9 +1485,13 @@ router.get('/invoices/sent', asyncHandler(async (req, res) => {
 }));
 
 router.post('/invoices/send-email', asyncHandler(async (req, res) => {
-  const { recipientEmail } = req.body;
+  const { recipientEmail, skipEmail } = req.body;
 
-  if (!recipientEmail) {
+  // "Save" raises the invoice — the record Accounts, Production and the
+  // Invoices list all depend on — without attempting delivery at all. A
+  // customer with no email on file, or a mail provider that's down, used to
+  // mean the invoice couldn't be created at all.
+  if (!skipEmail && !recipientEmail) {
     return res.status(400).json({
       success: false,
       message: 'recipientEmail is required',
@@ -1529,7 +1537,7 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     invoiceNumber: payload.invoiceNumber,
     store: normalizeStoreKey(payload.store),
     customerName: payload.customer.name || payload.customer.fullName,
-    customerEmail: recipientEmail,
+    customerEmail: recipientEmail || payload.customer?.email || '',
     customerPhone: payload.customer.phone || null,
     // Taken from the signed-in session, not from the request body: it decides
     // who may edit the invoice later.
@@ -1572,6 +1580,18 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     );
   }
 
+  if (skipEmail || !recipientEmail) {
+    const savedInvoice = await SentInvoice.findOne({ where: { invoiceNumber: payload.invoiceNumber } });
+    return res.status(201).json({
+      success: true,
+      message: 'Invoice saved',
+      data: {
+        invoiceNumber: payload.invoiceNumber,
+        sentInvoice: formatSentInvoice(savedInvoice),
+      },
+    });
+  }
+
   const result = await sendEmail({
     to: recipientEmail,
     subject: `Invoice ${payload.invoiceNumber} from The Way It Fits`,
@@ -1611,8 +1631,8 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
 
 router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const { status = 'Approved', note = '' } = req.body;
-  if (!['Approved', 'Flagged', 'Rejected'].includes(status)) {
-    return res.status(400).json({ success: false, message: 'Status must be Approved, Flagged, or Rejected.' });
+  if (!['Approved', 'Flagged', 'Rejected', 'Pending Accounts'].includes(status)) {
+    return res.status(400).json({ success: false, message: 'Status must be Approved, Flagged, Rejected, or Pending Accounts.' });
   }
   const invoice = await SentInvoice.findOne({
     where: { invoiceNumber: req.params.invoiceNumber },
@@ -1626,6 +1646,16 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
   }
 
   const payload = invoice.payload || {};
+
+  // Taking back an approval is the same weight as deciding it in the first
+  // place — Accounts made the call, but only an Owner or Admin can undo it,
+  // same as a partial payment under the release threshold.
+  if (status === 'Pending Accounts' && payload.accountApprovalStatus === 'Approved' && !['owner', 'admin'].includes(req.staff?.role)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Only an Owner or Admin can withdraw an approval already given',
+    });
+  }
 
   // Approving releases an invoice toward production, so the money has to be
   // there first. Measured against the same threshold, read from the same
@@ -1671,13 +1701,16 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
     where: { invoiceNumber: req.params.invoiceNumber },
   });
 
+  const approvalActionLabel = accountApprovalStatus === 'Pending Accounts'
+    ? 'sent back to Pending Accounts'
+    : `${accountApprovalStatus.toLowerCase()} by Accounts`;
   await notifyRoles(
     ['store_manager'],
-    `${invoice.invoiceNumber} for ${invoice.customerName} was ${accountApprovalStatus.toLowerCase()} by Accounts.`,
+    `${invoice.invoiceNumber} for ${invoice.customerName} was ${approvalActionLabel}.`,
     {
       invoiceNumber: invoice.invoiceNumber,
       event: 'account_approval',
-      title: `Invoice ${accountApprovalStatus.toLowerCase()} by Accounts`,
+      title: `Invoice ${approvalActionLabel}`,
     }
   );
   if (accountApprovalStatus === 'Approved' && payload.orderSheet) {
@@ -1741,10 +1774,9 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
   const totalPaid = alreadyPaid + amount;
   const paymentStatus = totalPaid <= 0 ? 'unpaid' : totalPaid >= payable ? 'fully_paid' : 'partial_paid';
   const method = String(req.body?.method || payload.paymentMethod || 'transfer');
-  // Evidence is optional on every payment, not just the first — a customer
-  // paying in instalments has a receipt for each one. What's uploaded here
-  // adds to what is already on the invoice; it never replaces it, so proof
-  // from an earlier instalment is not lost when a later one is recorded.
+  // Required on every payment, not just the first — a customer paying in
+  // instalments has a receipt for each one, and a payment recorded with
+  // nothing behind it left Accounts nowhere to check the figure against.
   const rawEvidence = Array.isArray(req.body?.paymentEvidence) ? req.body.paymentEvidence : [];
   const newEvidence = rawEvidence
     .filter((item) => item && safeImageDataUrl(item.dataUrl))
@@ -1756,6 +1788,13 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
       uploadedAt: item.uploadedAt || new Date().toISOString(),
       note: item.note ? String(item.note).slice(0, 500) : '',
     }));
+
+  if (amount > 0 && !newEvidence.length) {
+    return res.status(400).json({
+      success: false,
+      message: 'Attach a receipt screenshot or payment photo before recording this payment',
+    });
+  }
   const existingEvidence = Array.isArray(payload.paymentEvidence) ? payload.paymentEvidence : [];
   const evidence = [...existingEvidence, ...newEvidence];
 
