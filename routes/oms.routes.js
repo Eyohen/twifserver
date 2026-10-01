@@ -928,6 +928,20 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'A department is required for tailor accounts' });
   }
 
+  // Exactly one Owner account should exist at a time — the role that can
+  // create and edit every other staff account, approve inventory, reverse
+  // rejections, everything. A second one is almost always a mistake made
+  // while setting up a new account, not an intentional change of ownership.
+  if (role === 'owner') {
+    const existingOwner = await StaffUser.findOne({ where: { role: 'owner', status: 'active' } });
+    if (existingOwner) {
+      return res.status(409).json({
+        success: false,
+        message: `${existingOwner.displayName} is already the Owner. Edit that account instead of creating a second Owner.`,
+      });
+    }
+  }
+
   const pinHash = await bcrypt.hash(pin, 12);
   const staffUser = await StaffUser.create({
     phone,
@@ -989,6 +1003,15 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
   }
   if (resultingRole === 'tailor' && !resultingDepartment) {
     return res.status(400).json({ success: false, message: 'A department is required for tailor accounts' });
+  }
+  if (resultingRole === 'owner' && staffUser.role !== 'owner') {
+    const existingOwner = await StaffUser.findOne({ where: { role: 'owner', status: 'active', id: { [Op.ne]: staffUser.id } } });
+    if (existingOwner) {
+      return res.status(409).json({
+        success: false,
+        message: `${existingOwner.displayName} is already the Owner. Edit that account instead of making a second Owner.`,
+      });
+    }
   }
   if (resultingRole !== 'tailor') {
     updates.tailorDepartment = null;
