@@ -112,7 +112,11 @@ router.use((req, res, next) => {
 const knownStaffAccounts = {
   '08000000001': { pin: 'owner26', displayName: 'Jenni', role: 'owner', store: 'all' },
   '08000000002': { pin: 'admin26', displayName: 'Jim', role: 'admin', store: 'all' },
-  '08000000003': { pin: 'store26', displayName: 'Bola', role: 'store_manager', store: 'all' },
+  // 'all' here would make the store-manager scoping filter a permanent no-op
+  // for the one demo account every QA pass actually signs in as — a real
+  // store is needed so that scoping is ever observable through the standard
+  // demo flow.
+  '08000000003': { pin: 'store26', displayName: 'Bola', role: 'store_manager', store: 'lekki' },
   '08000000004': { pin: 'accounts26', displayName: 'Funke', role: 'accounts', store: 'all' },
   '08000000005': { pin: 'production26', displayName: 'Tunde', role: 'production_manager', store: 'production' },
   '08000000006': { pin: 'inventory26', displayName: 'Kemi', role: 'inventory_manager', store: 'all' },
@@ -1229,6 +1233,7 @@ router.get('/customers', asyncHandler(async (req, res) => {
   const profiles = [];
   const phoneIndex = new Map();
   const emailIndex = new Map();
+  const idIndex = new Map();
 
   customerRecords.forEach((customer) => {
     const profile = {
@@ -1253,12 +1258,22 @@ router.get('/customers', asyncHandler(async (req, res) => {
     const email = String(customer.email || '').trim().toLowerCase();
     if (phone) phoneIndex.set(phone, profile);
     if (email) emailIndex.set(email, profile);
+    idIndex.set(customer.id, profile);
   });
 
   sentInvoices.forEach((invoice) => {
     const phone = String(invoice.customerPhone || '').replace(/\D/g, '');
     const email = String(invoice.customerEmail || '').trim().toLowerCase();
-    let profile = (phone && phoneIndex.get(phone)) || (email && emailIndex.get(email));
+    // An invoice that knows its real customer is matched by that id alone —
+    // never by phone/email. A phone number freed by archiving a customer can
+    // be reused by someone else entirely; matching by the string would
+    // attach the archived customer's old invoices (and their "has
+    // measurements" signal) onto whoever owns that number now. Older rows
+    // with no recorded customerId fall back to the phone/email match, same
+    // as before.
+    let profile = invoice.customerId
+      ? (idIndex.get(invoice.customerId) || null)
+      : ((phone && phoneIndex.get(phone)) || (email && emailIndex.get(email)) || null);
 
     if (!profile) {
       profile = {
@@ -1273,8 +1288,14 @@ router.get('/customers', asyncHandler(async (req, res) => {
         invoices: [],
       };
       profiles.push(profile);
-      if (phone) phoneIndex.set(phone, profile);
-      if (email) emailIndex.set(email, profile);
+      // Only indexed for further phone/email matching when this invoice
+      // itself had no known customerId — a synthetic profile standing in
+      // for a specific (if unresolved) customerId must not attract some
+      // other, unrelated invoice that merely shares the same phone string.
+      if (!invoice.customerId) {
+        if (phone) phoneIndex.set(phone, profile);
+        if (email) emailIndex.set(email, profile);
+      }
     }
 
     profile.invoices.push(invoice);
@@ -1575,9 +1596,15 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   // the three cannot disagree about what is still owed.
   payload.amountReceived = amountAtCreation;
   const html = createTwifInvoiceHtml(payload);
+  // Verified against the table rather than trusted as-is: a stale or
+  // tampered id must not silently attach this invoice to the wrong customer.
+  const customerId = payload.customer?.id
+    ? (await Customer.findByPk(payload.customer.id, { attributes: ['id'] }))?.id || null
+    : null;
   const invoiceRecord = {
     invoiceNumber: payload.invoiceNumber,
     store: normalizeStoreKey(payload.store),
+    customerId,
     customerName: payload.customer.name || payload.customer.fullName,
     customerEmail: recipientEmail || payload.customer?.email || '',
     customerPhone: payload.customer.phone || null,
@@ -1726,16 +1753,24 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
   }
 
   const accountApprovalStatus = status;
+  // A reversal — re-approving an invoice that was previously rejected — is a
+  // decision worth its own record, not just a silent status flip, so it's
+  // called out explicitly in both the stored note and the notification.
+  const isReversal = accountApprovalStatus === 'Approved' && payload.accountApprovalStatus === 'Rejected';
+  const decidedBy = req.staff?.displayName || 'Accounts';
+  const storedNote = isReversal
+    ? `${decidedBy} reversed the earlier rejection and approved this invoice.${note ? ` ${note}` : ''}`
+    : note;
 
   await invoice.update({
     payload: {
       ...payload,
       accountApprovalStatus,
-      accountApprovalNote: note,
+      accountApprovalNote: storedNote,
       accountApprovedAt: accountApprovalStatus === 'Approved' ? new Date().toISOString() : null,
       // Who decided, so the invoice's timeline can say more than that it
       // happened.
-      accountApprovedBy: accountApprovalStatus === 'Approved' ? (req.staff?.displayName || null) : null,
+      accountApprovedBy: accountApprovalStatus === 'Approved' ? decidedBy : null,
     },
   });
 
@@ -1743,9 +1778,11 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
     where: { invoiceNumber: req.params.invoiceNumber },
   });
 
-  const approvalActionLabel = accountApprovalStatus === 'Pending Accounts'
-    ? 'sent back to Pending Accounts'
-    : `${accountApprovalStatus.toLowerCase()} by Accounts`;
+  const approvalActionLabel = isReversal
+    ? `re-approved by ${decidedBy} after being rejected`
+    : accountApprovalStatus === 'Pending Accounts'
+      ? 'sent back to Pending Accounts'
+      : `${accountApprovalStatus.toLowerCase()} by ${decidedBy}`;
   await notifyRoles(
     ['store_manager'],
     `${invoice.invoiceNumber} for ${invoice.customerName} was ${approvalActionLabel}.`,
@@ -3427,7 +3464,7 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
 // through an edit request the Owner approves. Everything else on an item is a
 // description of it — a mistyped SKU or a shelf that has been moved — and had
 // no way of being corrected at all.
-const EDITABLE_FABRIC_FIELDS = ['sku', 'name', 'colour', 'cost', 'location', 'supplier', 'lowStockThreshold', 'image'];
+const EDITABLE_FABRIC_FIELDS = ['sku', 'name', 'type', 'colour', 'cost', 'location', 'supplier', 'lowStockThreshold', 'image'];
 
 router.patch('/fabrics/:id', asyncHandler(async (req, res) => {
   const body = req.body || {};

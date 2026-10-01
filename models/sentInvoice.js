@@ -30,6 +30,18 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING(32),
       allowNull: true,
     },
+    // The customer this invoice was actually raised for, when known at
+    // creation time. customerName/Email/Phone above are point-in-time string
+    // snapshots and must stay that way (so editing a customer's profile later
+    // doesn't rewrite old invoices) — this is what lets GET /customers match
+    // an invoice back to its real owner instead of falling back to a phone/
+    // email string match, which breaks once a phone number is reused by a
+    // different customer. Nullable: older rows and invoices raised for a
+    // walk-in with no Customer record yet won't have one.
+    customerId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
     // Who raised it, as an id rather than a name. A display name is not unique
     // and was taken from the request body, so "the person who raised this" was
     // a claim anyone could make and anyone sharing that name could satisfy.

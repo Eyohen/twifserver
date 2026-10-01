@@ -11,10 +11,14 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING(160),
       allowNull: false,
     },
+    // Uniqueness is enforced at the application layer (POST/PATCH /customers,
+    // excluding archived customers so a freed-up number can be reused) —
+    // NOT here. A DB-level unique constraint can't tell an active customer
+    // from an archived one and would reject that reuse outright regardless
+    // of what the app allows.
     phone: {
       type: DataTypes.STRING(32),
       allowNull: true,
-      unique: true,
     },
     email: {
       type: DataTypes.STRING(255),
