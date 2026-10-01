@@ -1485,7 +1485,12 @@ router.post('/invoices/html-preview', (req, res) => {
 });
 
 router.get('/invoices/sent', asyncHandler(async (req, res) => {
+  // A store manager assigned to a specific store sees only that store's
+  // invoices; 'all' (and every other role) is unrestricted. Customers are
+  // deliberately left unscoped elsewhere — only invoices/order sheets are.
+  const scopedToOwnStore = req.staff?.role === 'store_manager' && req.staff.store && req.staff.store !== 'all';
   const invoices = await SentInvoice.findAll({
+    where: scopedToOwnStore ? { store: req.staff.store } : {},
     order: [['createdAt', 'DESC']],
     limit: 100,
   });
@@ -1496,6 +1501,22 @@ router.get('/invoices/sent', asyncHandler(async (req, res) => {
       invoices: invoices.map(formatSentInvoice),
     },
   });
+}));
+
+// A direct lookup by invoice number, for the invoice an action (a
+// notification, an "Edit" link from elsewhere) names specifically — not
+// every invoice fits in the 100 most recent that /invoices/sent returns, and
+// an older one must still be reachable rather than silently disappearing.
+router.get('/invoices/sent/:invoiceNumber', asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+  const scopedToOwnStore = req.staff?.role === 'store_manager' && req.staff.store && req.staff.store !== 'all';
+  if (scopedToOwnStore && invoice.store !== req.staff.store) {
+    return res.status(404).json({ success: false, message: 'Invoice not found' });
+  }
+
+  res.json({ success: true, data: { invoice: formatSentInvoice(invoice) } });
 }));
 
 router.post('/invoices/send-email', asyncHandler(async (req, res) => {
@@ -2648,6 +2669,10 @@ router.post('/order-sheets', asyncHandler(async (req, res) => {
 }));
 
 router.get('/orders', asyncHandler(async (req, res) => {
+  // Same store-scoping as /invoices/sent: a store manager tied to one store
+  // sees only that store's order sheets, via the store recorded on the
+  // invoice the sheet belongs to.
+  const scopedToOwnStore = req.staff?.role === 'store_manager' && req.staff.store && req.staff.store !== 'all';
   const orders = await OrderSheet.findAll({
     order: [['createdAt', 'DESC']],
     include: [
@@ -2655,6 +2680,7 @@ router.get('/orders', asyncHandler(async (req, res) => {
         model: Invoice,
         as: 'invoice',
         include: [{ model: Customer, as: 'customer' }],
+        ...(scopedToOwnStore ? { where: { store: req.staff.store }, required: true } : {}),
       },
       { model: StaffUser, as: 'assignedTailor', attributes: ['id', 'displayName', 'role'] },
     ],
