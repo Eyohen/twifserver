@@ -1104,8 +1104,15 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // record without one is of little use — and two customers sharing one address
 // cannot be told apart when a reply comes back.
 const findCustomerByEmail = async (email, exceptId) => {
-  const rows = await Customer.findAll({ attributes: ['id', 'fullName', 'email'] });
-  return rows.find((row) => normalisedEmail(row.email) === normalisedEmail(email) && row.id !== exceptId);
+  const rows = await Customer.findAll({ attributes: ['id', 'fullName', 'email', 'category'] });
+  return rows.find((row) => row.category !== 'Archived' && normalisedEmail(row.email) === normalisedEmail(email) && row.id !== exceptId);
+};
+
+// A phone number freed up by archiving a customer (a recycled SIM, a walk-in
+// re-registering) must be reusable — only an active customer can hold a clash.
+const findCustomerByPhone = async (phone, exceptId) => {
+  const rows = await Customer.findAll({ attributes: ['id', 'fullName', 'phone', 'category'] });
+  return rows.find((row) => row.category !== 'Archived' && String(row.phone || '').trim() === String(phone || '').trim() && row.id !== exceptId);
 };
 
 // Records created before the address was required, or before it had to be
@@ -1170,7 +1177,7 @@ router.post('/customers', asyncHandler(async (req, res) => {
     }
   }
 
-  const existingPhone = await Customer.findOne({ where: { phone } });
+  const existingPhone = await findCustomerByPhone(phone);
   if (existingPhone) {
     return res.status(409).json({ success: false, message: `${existingPhone.fullName} already uses ${phone}` });
   }
@@ -1332,16 +1339,23 @@ router.patch('/customers/:id', asyncHandler(async (req, res) => {
   if (!String(fullName || '').trim() || !String(phone || '').trim()) {
     return res.status(400).json({ success: false, message: 'Full name and phone number are required.' });
   }
-  if (!normalisedEmail(email)) {
-    return res.status(400).json({ success: false, message: 'An email address is required' });
-  }
-  if (!EMAIL_PATTERN.test(normalisedEmail(email))) {
+  // Email is optional here too, matching customer creation — Measurements and
+  // other screens must be able to save a profile that never collected one.
+  const hasEmail = Boolean(normalisedEmail(email));
+  if (hasEmail && !EMAIL_PATTERN.test(normalisedEmail(email))) {
     return res.status(400).json({ success: false, message: 'Please enter a valid email address' });
   }
 
-  const clash = await findCustomerByEmail(email, customer.id);
-  if (clash) {
-    return res.status(409).json({ success: false, message: `${clash.fullName} already uses ${clash.email}` });
+  if (hasEmail) {
+    const clash = await findCustomerByEmail(email, customer.id);
+    if (clash) {
+      return res.status(409).json({ success: false, message: `${clash.fullName} already uses ${clash.email}` });
+    }
+  }
+
+  const phoneClash = await findCustomerByPhone(phone, customer.id);
+  if (phoneClash) {
+    return res.status(409).json({ success: false, message: `${phoneClash.fullName} already uses ${phone}` });
   }
 
   const existingMeasurements = customer.measurements || {};
@@ -1374,7 +1388,7 @@ router.patch('/customers/:id', asyncHandler(async (req, res) => {
   await customer.update({
     fullName: String(fullName).trim(),
     phone: String(phone).trim(),
-    email: String(email).trim(),
+    email: hasEmail ? String(email).trim() : null,
     category: nextCategory,
     storeCreditBalance: storeCreditBalance ?? customer.storeCreditBalance,
     measurements: {
@@ -1503,6 +1517,13 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     return res.status(400).json({
       success: false,
       message: 'customer.name is required',
+    });
+  }
+
+  if (!String(payload.customer?.phone || '').trim()) {
+    return res.status(400).json({
+      success: false,
+      message: 'customer.phone is required',
     });
   }
 
@@ -2084,7 +2105,7 @@ const productionBlockReason = (invoice, orderSheet, releasePercent = 70) => {
 const measurementsFromCustomer = async (orderSheet) => {
   const hasOwnFigures = orderSheet.measurementDetails && typeof orderSheet.measurementDetails === 'object'
     && Object.values(orderSheet.measurementDetails).some((value) => String(value ?? '').trim());
-  if (hasOwnFigures || String(orderSheet.measurements ?? '').trim()) return null;
+  if (hasOwnFigures) return null;
   if (!orderSheet.customerId) return null;
 
   const customer = await Customer.findByPk(orderSheet.customerId);
@@ -2094,10 +2115,10 @@ const measurementsFromCustomer = async (orderSheet) => {
   );
   if (!Object.keys(measurementDetails).length) return null;
 
-  const measurements = Object.entries(measurementDetails)
-    .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${value}`)
-    .join(', ');
-  return { measurementDetails, measurements };
+  // Only the structured figures are backfilled. `measurements` is the store
+  // manager's free-text "anything else the tailor should know" fit note —
+  // it must never be overwritten with a formatted measurements summary.
+  return { measurementDetails };
 };
 
 // An invoice belongs to whoever raised it and to the people who run the shop.
@@ -2187,31 +2208,37 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   if (entersProduction) {
     const measurementBackfill = await measurementsFromCustomer(nextOrderSheet);
     if (measurementBackfill) Object.assign(nextOrderSheet, measurementBackfill);
+  }
 
-    const settings = await readSetting(SETTINGS_KEY, {});
-    const releasePercent = Number(settings.paymentReleasePercent ?? DEFAULT_SETTINGS.paymentReleasePercent);
-    const blocked = productionBlockReason(invoice, nextOrderSheet, releasePercent);
-    if (blocked) {
-      // An Owner or Admin may send a held order through anyway, and the
-      // override is recorded against the sheet. Accounts may not: approving the
-      // invoice is their part, releasing it is not.
-      const mayOverride = ['owner', 'admin'].includes(req.staff?.role);
-      if (!req.body.overrideProductionHold || !mayOverride) {
-        return res.status(409).json({
-          success: false,
-          message: blocked,
-          data: { canOverride: mayOverride },
-        });
-      }
-      nextOrderSheet.productionOverride = {
-        reason: blocked,
-        by: req.staff.displayName,
-        at: new Date().toISOString(),
-      };
-      await notifyRoles(['owner', 'admin', 'accounts'],
-        `${req.staff.displayName} sent ${invoice.invoiceNumber} to production despite: ${blocked}.`,
-        { invoiceNumber: invoice.invoiceNumber, event: 'production_override' });
-    }
+  // Whether an order is held is evaluated on every save, not only ones that
+  // flip status or (re)assign a tailor — "Send to production anyway" is its
+  // own action and must record the override even when nothing else on the
+  // sheet changed in this same request.
+  const settings = await readSetting(SETTINGS_KEY, {});
+  const releasePercent = Number(settings.paymentReleasePercent ?? DEFAULT_SETTINGS.paymentReleasePercent);
+  const blocked = productionBlockReason(invoice, nextOrderSheet, releasePercent);
+  // An Owner or Admin may send a held order through anyway, and the override
+  // is recorded against the sheet. Accounts may not: approving the invoice is
+  // their part, releasing it is not.
+  const mayOverride = ['owner', 'admin'].includes(req.staff?.role);
+
+  if (entersProduction && blocked && (!req.body.overrideProductionHold || !mayOverride)) {
+    return res.status(409).json({
+      success: false,
+      message: blocked,
+      data: { canOverride: mayOverride },
+    });
+  }
+
+  if (req.body.overrideProductionHold && mayOverride && blocked) {
+    nextOrderSheet.productionOverride = {
+      reason: blocked,
+      by: req.staff.displayName,
+      at: new Date().toISOString(),
+    };
+    await notifyRoles(['owner', 'admin', 'accounts'],
+      `${req.staff.displayName} sent ${invoice.invoiceNumber} to production despite: ${blocked}.`,
+      { invoiceNumber: invoice.invoiceNumber, event: 'production_override' });
   }
   delete nextOrderSheet.overrideProductionHold;
 
@@ -2853,7 +2880,7 @@ router.get('/inventory-edit-requests', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { requests: requests.map((request) => ({ ...request.toJSON(), fabric: byId.get(request.fabricId) || null })) } });
 }));
 
-router.patch('/inventory-edit-requests/:id/review', requireRole('owner'), asyncHandler(async (req, res) => {
+router.patch('/inventory-edit-requests/:id/review', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
   const { decision, reviewNote = '' } = req.body;
   const owner = req.staff;
   if (!['Approved', 'Rejected'].includes(decision)) return res.status(400).json({ success: false, message: 'Decision must be Approved or Rejected.' });
