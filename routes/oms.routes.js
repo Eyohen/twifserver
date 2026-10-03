@@ -2996,6 +2996,11 @@ router.patch('/inventory-edit-requests/:id/review', requireRole('owner', 'admin'
 // fabric still works: it arrives as a list of one.
 router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
   const { trackingToken: token, tailorName } = req.body;
+  // Which garment this allocation is for. Undefined/null means the whole
+  // job — the only option before fabric was tracked per item, and still how
+  // a legacy sheet with no real `items` array is allocated.
+  const itemIndex = Number.isInteger(req.body.itemIndex) ? req.body.itemIndex : null;
+  const itemName = req.body.itemName ? String(req.body.itemName).trim() : null;
 
   // Either the list, or the single fabric the older callers send.
   const requested = Array.isArray(req.body.fabrics) && req.body.fabrics.length
@@ -3030,8 +3035,12 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
     const invoice = await SentInvoice.findByPk(sourceInvoice.id, { transaction, lock: transaction.LOCK.UPDATE });
     const payload = invoice.payload || {};
     const orderSheet = payload.orderSheet || {};
-    if (orderSheet.fabricAllocated) {
-      const error = new Error('Fabric has already been allocated to this order');
+    const items = Array.isArray(orderSheet.items) ? orderSheet.items : null;
+    const targetItem = items && itemIndex !== null ? items[itemIndex] : null;
+
+    const alreadyAllocated = targetItem ? targetItem.fabricAllocated : orderSheet.fabricAllocated;
+    if (alreadyAllocated) {
+      const error = new Error(`Fabric has already been allocated to ${targetItem ? (itemName || 'this item') : 'this order'}`);
       error.status = 409;
       throw error;
     }
@@ -3066,8 +3075,11 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
         invoiceNumber: invoice.invoiceNumber,
         customerName: invoice.customerName,
         tailorName,
-        // Unique per row, and one order can now hold several.
-        trackingToken: `${token}:${entry.fabric.id}`,
+        itemIndex,
+        itemName,
+        // Unique per row — per item too, now, so the same fabric allocated
+        // to two different garments on one order doesn't collide.
+        trackingToken: `${token}:${itemIndex ?? 'job'}:${entry.fabric.id}`,
       }, { transaction });
       allocated.push({
         fabricId: entry.fabric.id,
@@ -3078,10 +3090,7 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
     }
 
     const [first] = fabrics;
-    const nextOrderSheet = {
-      ...orderSheet,
-      // Everything that was taken, and the first mirrored onto the old fields
-      // the board and the tracking page still read.
+    const itemFields = {
       fabricAllocations: allocated,
       fabric: first.fabric.name,
       fabricId: first.fabric.id,
@@ -3089,8 +3098,34 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
       fabricUnit: first.fabric.unit,
       fabricAllocated: true,
       fabricAllocatedAt: new Date().toISOString(),
-      tailor: tailorName,
     };
+
+    let nextOrderSheet;
+    if (targetItem) {
+      const nextItems = items.map((entry, index) => (index === itemIndex ? { ...entry, ...itemFields } : entry));
+      nextOrderSheet = {
+        ...orderSheet,
+        items: nextItems,
+        // Mirrored for the board/tracking page, which read these single
+        // fields rather than iterating items: true only once every item
+        // that needs fabric has had it allocated, and the fields below come
+        // from whichever item has them first rather than assuming item 0.
+        fabricAllocated: nextItems.every((entry) => entry.fabricAllocated),
+        fabricAllocations: nextItems.flatMap((entry) => entry.fabricAllocations || []),
+        ...(() => {
+          const withFabric = nextItems.find((entry) => entry.fabric);
+          return withFabric ? {
+            fabric: withFabric.fabric,
+            fabricId: withFabric.fabricId,
+            fabricUsage: withFabric.fabricUsage,
+            fabricUnit: withFabric.fabricUnit,
+          } : {};
+        })(),
+        tailor: orderSheet.tailor && orderSheet.tailor !== 'Unassigned' ? orderSheet.tailor : tailorName,
+      };
+    } else {
+      nextOrderSheet = { ...orderSheet, ...itemFields, tailor: tailorName };
+    }
     await invoice.update({ payload: { ...payload, orderSheet: nextOrderSheet } }, { transaction });
 
     allocationResult = {
