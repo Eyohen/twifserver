@@ -2954,7 +2954,10 @@ router.post('/fabrics/:id/edit-requests', asyncHandler(async (req, res) => {
   }
   if (!Object.keys(changes).length) return res.status(400).json({ success: false, message: 'At least one proposed change is required.' });
   const request = await InventoryEditRequest.create({ fabricId: fabric.id, requestedBy, requestedByRole, proposedChanges: changes, reason: String(reason).trim() });
-  await notifyRoles(['owner', 'admin', 'accounts'], `${requestedBy} requested changes to inventory item ${fabric.name}. Owner approval is required.`, { event: 'inventory_edit_requested', requestId: request.id, fabricId: fabric.id });
+  // Owner/Admin approve this, not Accounts — the request isn't a financial
+  // record yet, just a proposal, so it doesn't concern Accounts until (if)
+  // it's actually approved and changes the books.
+  await notifyRoles(['owner', 'admin'], `${requestedBy} requested changes to inventory item ${fabric.name}. Owner approval is required.`, { event: 'inventory_edit_requested', requestId: request.id, fabricId: fabric.id });
   return res.status(201).json({ success: true, data: { request } });
 }));
 
@@ -2979,7 +2982,12 @@ router.patch('/inventory-edit-requests/:id/review', requireRole('owner', 'admin'
     if (decision === 'Approved') await fabric.update(request.proposedChanges, { transaction });
     await request.update({ status: decision, reviewedBy: owner.displayName, reviewedAt: new Date(), reviewNote }, { transaction });
   });
-  await notifyRoles(['inventory_manager', 'admin', 'accounts'], `Inventory edit request for ${fabric.name} was ${decision.toLowerCase()} by ${owner.displayName}.`, { event: `inventory_edit_${decision.toLowerCase()}`, requestId: request.id, fabricId: fabric.id });
+  // Accounts only cares once stock actually changed — a rejection changes
+  // nothing on the books, so it doesn't concern them.
+  const inventoryDecisionRoles = decision === 'Approved'
+    ? ['inventory_manager', 'admin', 'accounts']
+    : ['inventory_manager', 'admin'];
+  await notifyRoles(inventoryDecisionRoles, `Inventory edit request for ${fabric.name} was ${decision.toLowerCase()} by ${owner.displayName}.`, { event: `inventory_edit_${decision.toLowerCase()}`, requestId: request.id, fabricId: fabric.id });
   res.json({ success: true, data: { request, fabric } });
 }));
 
