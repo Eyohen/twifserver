@@ -3108,9 +3108,13 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
         items: nextItems,
         // Mirrored for the board/tracking page, which read these single
         // fields rather than iterating items: true only once every item
-        // that needs fabric has had it allocated, and the fields below come
-        // from whichever item has them first rather than assuming item 0.
-        fabricAllocated: nextItems.every((entry) => entry.fabricAllocated),
+        // that actually has fabric chosen has had it allocated — an item
+        // left as "Nil, Production will choose" never needed one, so it
+        // can't hold this true forever, and the fields below come from
+        // whichever item has them first rather than assuming item 0.
+        fabricAllocated: nextItems.every((entry) => (
+          entry.fabricAllocated || !(entry.fabrics || []).some((fabric) => fabric.fabricId || fabric.clientSupplied)
+        )),
         fabricAllocations: nextItems.flatMap((entry) => entry.fabricAllocations || []),
         ...(() => {
           const withFabric = nextItems.find((entry) => entry.fabric);
