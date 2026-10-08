@@ -1548,21 +1548,59 @@ router.post('/invoices/html-preview', (req, res) => {
   res.type('html').send(html);
 });
 
+const tailorHasDepartmentWork = (staff, orderSheet = {}) => {
+  if (staff?.role !== 'tailor' || !staff.displayName || !staff.tailorDepartment) return false;
+  const items = Array.isArray(orderSheet.items) ? orderSheet.items : [];
+  if (items.length) {
+    return items.some((item) => (
+      Array.isArray(item.tailors) && item.tailors.includes(staff.displayName)
+      && Array.isArray(item.departments) && item.departments.includes(staff.tailorDepartment)
+    ));
+  }
+  const assigned = (Array.isArray(orderSheet.tailors) && orderSheet.tailors.includes(staff.displayName))
+    || orderSheet.tailor === staff.displayName;
+  const departments = Array.isArray(orderSheet.departments) ? orderSheet.departments : [];
+  return assigned && (!departments.length || departments.includes(staff.tailorDepartment));
+};
+
+const invoiceForStaff = (invoice, staff) => {
+  const formatted = formatSentInvoice(invoice);
+  if (staff?.role !== 'tailor' || !Array.isArray(formatted.orderSheet?.items)) return formatted;
+  const keptIndexes = formatted.orderSheet.items
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => (
+      Array.isArray(item.tailors) && item.tailors.includes(staff.displayName)
+      && Array.isArray(item.departments) && item.departments.includes(staff.tailorDepartment)
+    ));
+  if (!keptIndexes.length) return formatted;
+  return {
+    ...formatted,
+    items: keptIndexes.map(({ index }) => formatted.items[index]).filter(Boolean),
+    orderSheet: {
+      ...formatted.orderSheet,
+      items: keptIndexes.map(({ item }) => item),
+    },
+  };
+};
+
 router.get('/invoices/sent', asyncHandler(async (req, res) => {
   // A store manager assigned to a specific store sees only that store's
   // invoices; 'all' (and every other role) is unrestricted. Customers are
   // deliberately left unscoped elsewhere — only invoices/order sheets are.
   const scopedToOwnStore = req.staff?.role === 'store_manager' && req.staff.store && req.staff.store !== 'all';
-  const invoices = await SentInvoice.findAll({
+  const rows = await SentInvoice.findAll({
     where: scopedToOwnStore ? { store: req.staff.store } : {},
     order: [['createdAt', 'DESC']],
     limit: 100,
   });
+  const invoices = req.staff?.role === 'tailor'
+    ? rows.filter((invoice) => tailorHasDepartmentWork(req.staff, invoice.payload?.orderSheet))
+    : rows;
 
   res.json({
     success: true,
     data: {
-      invoices: invoices.map(formatSentInvoice),
+      invoices: invoices.map((invoice) => invoiceForStaff(invoice, req.staff)),
     },
   });
 }));
@@ -1579,8 +1617,11 @@ router.get('/invoices/sent/:invoiceNumber', asyncHandler(async (req, res) => {
   if (scopedToOwnStore && invoice.store !== req.staff.store) {
     return res.status(404).json({ success: false, message: 'Invoice not found' });
   }
+  if (req.staff?.role === 'tailor' && !tailorHasDepartmentWork(req.staff, invoice.payload?.orderSheet)) {
+    return res.status(404).json({ success: false, message: 'Invoice not found' });
+  }
 
-  res.json({ success: true, data: { invoice: formatSentInvoice(invoice) } });
+  res.json({ success: true, data: { invoice: invoiceForStaff(invoice, req.staff) } });
 }));
 
 router.post('/invoices/send-email', asyncHandler(async (req, res) => {
@@ -1598,6 +1639,9 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   }
 
   const payload = buildInvoiceHtmlPayload(req.body);
+  if (req.staff?.role === 'store_manager' && req.staff.store !== 'all' && normalizeStoreKey(payload.store) !== req.staff.store) {
+    return res.status(403).json({ success: false, message: 'You may only create invoices for your assigned store' });
+  }
   if (!payload.customer?.name && !payload.customer?.fullName) {
     return res.status(400).json({
       success: false,
@@ -1760,6 +1804,10 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
   }
 
   const payload = invoice.payload || {};
+
+  if (status === 'Approved' && payload.accountApprovalStatus === 'Approved') {
+    return res.status(409).json({ success: false, message: 'This invoice has already been approved' });
+  }
 
   // Taking back an approval is the same weight as deciding it in the first
   // place — Accounts made the call, but only an Owner or Admin can undo it,
@@ -2257,10 +2305,7 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   // along, never editing what's on it.
   const isPrivilegedEditor = mayEditInvoice(req.staff, invoice);
   const isProductionManager = req.staff?.role === 'production_manager';
-  const isAssignedTailor = req.staff?.role === 'tailor' && Boolean(req.staff?.displayName) && (
-    (Array.isArray(previousOrderSheet.tailors) && previousOrderSheet.tailors.includes(req.staff.displayName))
-    || previousOrderSheet.tailor === req.staff.displayName
-  );
+  const isAssignedTailor = tailorHasDepartmentWork(req.staff, previousOrderSheet);
   if (!isPrivilegedEditor && !isProductionManager && !isAssignedTailor) {
     return res.status(403).json({
       success: false,
@@ -2567,6 +2612,21 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
         success: false,
         message: `An item can be shared between at most ${MAX_TAILORS_PER_ITEM} tailors`,
       });
+    }
+    if (names.length) {
+      const departments = Array.isArray(items[index].departments) ? items[index].departments : [];
+      if (!departments.length) {
+        return res.status(409).json({ success: false, message: `Assign a department to item ${index + 1} before choosing a tailor` });
+      }
+      const staffTailors = await StaffUser.findAll({
+        where: { displayName: { [Op.in]: names }, role: 'tailor', status: 'active' },
+        attributes: ['displayName', 'tailorDepartment'],
+      });
+      const byName = new Map(staffTailors.map((tailor) => [tailor.displayName, tailor]));
+      const invalid = names.find((name) => !byName.has(name) || !departments.includes(byName.get(name).tailorDepartment));
+      if (invalid) {
+        return res.status(400).json({ success: false, message: `${invalid} is not an active tailor in this item's department` });
+      }
     }
     items[index] = {
       ...items[index],
