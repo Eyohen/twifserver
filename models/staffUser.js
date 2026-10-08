@@ -63,7 +63,8 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: true,
     },
     tailorDepartment: {
-      type: DataTypes.ENUM('native', 'suit', 'trouser', 'finishing'),
+      // Department keys are owner-managed, so this cannot be a fixed enum.
+      type: DataTypes.STRING(40),
       allowNull: true,
     },
     tailorGrade: {

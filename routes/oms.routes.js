@@ -132,6 +132,10 @@ const STAFF_ROLES = ['owner', 'admin', 'store_manager', 'accounts', 'production_
 // rather than living inside it.
 const staffStores = () => [...storeKeys(), 'all', 'production'];
 const STAFF_STATUSES = ['active', 'inactive', 'deactivated'];
+const PHONE_PATTERN = /^\d{11}$/;
+const phoneProblem = (value) => PHONE_PATTERN.test(String(value || '').trim())
+  ? null
+  : 'Phone number must contain exactly 11 digits.';
 
 // A date field left blank arrives as an empty string, which Sequelize turns
 // into the literal "Invalid date" and Postgres rejects — a 500 with a database
@@ -919,6 +923,8 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
       message: 'phone, pin, displayName, and role are required',
     });
   }
+  const invalidPhone = phoneProblem(phone);
+  if (invalidPhone) return res.status(400).json({ success: false, message: invalidPhone });
   const birthDate = dateOrNull(dateOfBirth);
 
   const problem = staffFieldProblem({ role, store, status: req.body.status });
@@ -926,6 +932,9 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
 
   if (role === 'tailor' && !tailorDepartment) {
     return res.status(400).json({ success: false, message: 'A department is required for tailor accounts' });
+  }
+  if (role === 'tailor' && !(await Department.findOne({ where: { key: tailorDepartment, status: 'active' } }))) {
+    return res.status(400).json({ success: false, message: 'Choose an active department for this tailor account' });
   }
 
   // Exactly one Owner account should exist at a time — the role that can
@@ -991,6 +1000,10 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
     .filter((field) => Object.prototype.hasOwnProperty.call(requestedUpdates, field))
     .map((field) => [field, requestedUpdates[field] || null]));
   if ('dateOfBirth' in updates) updates.dateOfBirth = dateOrNull(updates.dateOfBirth);
+  if ('phone' in updates) {
+    const invalidPhone = phoneProblem(updates.phone);
+    if (invalidPhone) return res.status(400).json({ success: false, message: invalidPhone });
+  }
 
   // Editing a staff member hits the same columns, so it is checked the same way.
   const editProblem = staffFieldProblem(updates);
@@ -1003,6 +1016,9 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
   }
   if (resultingRole === 'tailor' && !resultingDepartment) {
     return res.status(400).json({ success: false, message: 'A department is required for tailor accounts' });
+  }
+  if (resultingRole === 'tailor' && !(await Department.findOne({ where: { key: resultingDepartment, status: 'active' } }))) {
+    return res.status(400).json({ success: false, message: 'Choose an active department for this tailor account' });
   }
   if (resultingRole === 'owner' && staffUser.role !== 'owner') {
     const existingOwner = await StaffUser.findOne({ where: { role: 'owner', status: 'active', id: { [Op.ne]: staffUser.id } } });
@@ -1188,6 +1204,8 @@ router.post('/customers', asyncHandler(async (req, res) => {
       message: 'fullName and phone are required',
     });
   }
+  const invalidPhone = phoneProblem(phone);
+  if (invalidPhone) return res.status(400).json({ success: false, message: invalidPhone });
   // Email reaches the invoice and the tracking link to them, so it's worth
   // having — but a store manager taking a phone order shouldn't be blocked
   // from creating the customer over it. Other screens (Measurements, for
@@ -1383,6 +1401,8 @@ router.patch('/customers/:id', asyncHandler(async (req, res) => {
   if (!String(fullName || '').trim() || !String(phone || '').trim()) {
     return res.status(400).json({ success: false, message: 'Full name and phone number are required.' });
   }
+  const invalidPhone = phoneProblem(phone);
+  if (invalidPhone) return res.status(400).json({ success: false, message: invalidPhone });
   // Email is optional here too, matching customer creation — Measurements and
   // other screens must be able to save a profile that never collected one.
   const hasEmail = Boolean(normalisedEmail(email));
@@ -1591,6 +1611,8 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
       message: 'customer.phone is required',
     });
   }
+  const invalidPhone = phoneProblem(payload.customer.phone);
+  if (invalidPhone) return res.status(400).json({ success: false, message: invalidPhone });
 
   if (!payload.items.length) {
     return res.status(400).json({
@@ -2375,6 +2397,10 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
 
   const payload = invoice.payload || {};
   const { items, notes, customerName, customerPhone, customerEmail, store, dueDate, removePaymentEvidenceAt, addPaymentEvidence } = req.body;
+  if (customerPhone !== undefined) {
+    const invalidPhone = phoneProblem(customerPhone);
+    if (invalidPhone) return res.status(400).json({ success: false, message: invalidPhone });
+  }
 
   // Once Accounts have approved an invoice, its store and the evidence they
   // approved against are part of the books — swapping either out from under
