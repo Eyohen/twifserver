@@ -23,6 +23,16 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       defaultValue: 'active',
     },
+    fields: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: [],
+    },
+    note: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+      defaultValue: '',
+    },
   }, {
     tableName: 'Departments',
     timestamps: true,

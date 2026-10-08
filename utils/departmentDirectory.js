@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../models');
+const DEFAULT_FIELDS = require('../config/departmentFields');
 
 // The six departments the review doc specifies. A blank Departments table —
 // first boot, or a database from before this table existed — gets them back
@@ -19,7 +20,12 @@ let cache = new Map(DEFAULT_DEPARTMENTS.map((department) => [department.key, { .
 const ensureSeeded = async () => {
   const existing = await db.Department.count();
   if (existing > 0) return;
-  await db.Department.bulkCreate(DEFAULT_DEPARTMENTS.map((department) => ({ ...department, status: 'active' })));
+  await db.Department.bulkCreate(DEFAULT_DEPARTMENTS.map((department) => ({
+    ...department,
+    status: 'active',
+    fields: DEFAULT_FIELDS[department.key]?.fields || [],
+    note: DEFAULT_FIELDS[department.key]?.note || '',
+  })));
 };
 
 const refreshDepartmentCache = async () => {

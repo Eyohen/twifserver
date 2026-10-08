@@ -888,17 +888,37 @@ router.patch('/departments/:id', requireRole('owner', 'admin'), asyncHandler(asy
   const department = await Department.findByPk(req.params.id);
   if (!department) return res.status(404).json({ success: false, message: 'Department not found.' });
 
-  const { name, status } = req.body || {};
+  const { name, status, fields, note } = req.body || {};
   if (status !== undefined && !['active', 'inactive'].includes(status)) {
     return res.status(400).json({ success: false, message: 'Status must be "active" or "inactive".' });
   }
   if (name !== undefined && !String(name).trim()) {
     return res.status(400).json({ success: false, message: 'A department needs a name.' });
   }
+  if ((fields !== undefined || note !== undefined) && req.staff.role !== 'owner') {
+    return res.status(403).json({ success: false, message: 'Only the Owner can change department parameters.' });
+  }
+  let cleanFields;
+  if (fields !== undefined) {
+    if (!Array.isArray(fields)) return res.status(400).json({ success: false, message: 'Department parameters must be a list.' });
+    cleanFields = fields.map((entry) => ({
+      key: slugifyDepartmentKey(entry?.key || entry?.label).replace(/-([a-z0-9])/g, (_, letter) => letter.toUpperCase()),
+      label: String(entry?.label || '').trim().slice(0, 120),
+      required: entry?.required !== false,
+    }));
+    if (cleanFields.some((entry) => !entry.key || !entry.label)) {
+      return res.status(400).json({ success: false, message: 'Every parameter needs a name.' });
+    }
+    if (new Set(cleanFields.map((entry) => entry.key)).size !== cleanFields.length) {
+      return res.status(400).json({ success: false, message: 'Parameter names must be unique within a department.' });
+    }
+  }
 
   await department.update({
     ...(name !== undefined ? { name: String(name).trim() } : {}),
     ...(status !== undefined ? { status } : {}),
+    ...(cleanFields !== undefined ? { fields: cleanFields } : {}),
+    ...(note !== undefined ? { note: String(note).trim().slice(0, 2000) } : {}),
   });
   await refreshDepartmentCache();
 
@@ -2161,22 +2181,6 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
 // as well as on screen: a rule that only the interface applies is a suggestion.
 const WORKING_STATUSES = ['Assigned', 'In Progress', 'Ready'];
 
-// The six departments' construction/style fields, per the review doc.
-// "additionalInformation" is optional in every department; every other
-// key here is required before an item can go to production. Keys must
-// match twif/src/config/departmentFields.js exactly — a mismatch here
-// makes this check silently pass fields that are actually empty.
-const DEPARTMENT_REQUIRED_FIELDS = {
-  suit: ['fabricColor', 'suitStyle', 'gender', 'lapelFabric', 'lapelStyle', 'lapelWidth', 'pocketStyle', 'ventStyle', 'collarType', 'sbDb', 'sleeveType', 'handKnitting', 'buttonStyle'],
-  native: ['fabricColor', 'neckType', 'length', 'sleeveType', 'cuffType', 'chestPocketStyle', 'collarType', 'embroidery', 'embroideryType', 'collarButton', 'twifLogo', 'buttonType', 'liningType', 'collarSize', 'longSleeveType', 'slitType', 'slitLiningType', 'sidePocket', 'cap', 'capStyle'],
-  shirts: ['fabricColor', 'gender', 'buttonHoleStand', 'sleeveType', 'longSleeveType', 'cuffStyle', 'cuffType', 'collar', 'collarSize', 'embroidery', 'embroideryType', 'collarThickness', 'shirtEnd', 'beadingEmbellishment', 'buttonType'],
-  agbada: ['fabricColor', 'agbadaStyle', 'sleeveType', 'embroideryType', 'sleeveLining'],
-  design: ['fabricType', 'fabricColor', 'threadColor', 'embroideryLength', 'danshiki', 'trouser', 'cap'],
-  pants: ['fabricColor', 'pantType', 'gender', 'pleats', 'bandStyle', 'bandExtension', 'bandSize', 'beltlessType', 'sideStripe', 'backPocketStyle'],
-};
-
-const DEPARTMENT_LABELS = { suit: 'Suit', native: 'Native', shirts: 'Shirts', agbada: 'Agbada', design: 'Design', pants: 'Pants' };
-
 // Names every item that's missing its department tag or has empty required
 // fields for the department it's tagged with, so the block message tells
 // staff exactly what to fix instead of just "something is missing."
@@ -2196,16 +2200,18 @@ const departmentBlockReason = (orderSheet) => {
       return;
     }
     departmentKeys.forEach((departmentKey) => {
-      const required = DEPARTMENT_REQUIRED_FIELDS[departmentKey];
-      if (!required) return; // Unknown/newly-added department with no field list yet — nothing to enforce.
+      const department = listDepartments().find((entry) => entry.key === departmentKey);
+      const required = (department?.fields || []).filter((field) => field.required).map((field) => field.key);
+      if (!required.length) return;
       // Namespaced per department once an item can carry several; a single
       // flat object on an older sheet that only ever had the one.
       const rawFields = item.departmentFields || {};
       const fields = (rawFields[departmentKey] && typeof rawFields[departmentKey] === 'object') ? rawFields[departmentKey] : rawFields;
       const missing = required.filter((key) => !String(fields[key] ?? '').trim());
       if (missing.length) {
-        const departmentLabel = DEPARTMENT_LABELS[departmentKey] || departmentKey;
-        problems.push(`${label} (${departmentLabel}) is missing: ${missing.join(', ')}`);
+        const departmentLabel = department?.name || departmentKey;
+        const labels = Object.fromEntries((department?.fields || []).map((field) => [field.key, field.label]));
+        problems.push(`${label} (${departmentLabel}) is missing: ${missing.map((key) => labels[key] || key).join(', ')}`);
       }
     });
   });

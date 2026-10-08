@@ -20,6 +20,7 @@ const omsRoutes = require('./routes/oms.routes');
 const shopifyRoutes = require('./routes/shopify.routes');
 const { refreshStoreCache } = require('./utils/storeDirectory');
 const { refreshDepartmentCache } = require('./utils/departmentDirectory');
+const defaultDepartmentFields = require('./config/departmentFields');
 
 const app = express();
 
@@ -261,6 +262,26 @@ const startServer = async () => {
       if (customersTable?.phone?.allowNull === false) {
         await queryInterface.sequelize.query('ALTER TABLE "Customers" ALTER COLUMN "phone" DROP NOT NULL;');
         console.log('Schema check: dropped NOT NULL on Customers.phone');
+      }
+
+      // Tailor departments are owner-managed. Older production databases
+      // still have the original four-value enum because deploys do not run
+      // sequelize-cli migrations; widen it without changing stored values.
+      const staffTable = await queryInterface.describeTable('StaffUsers').catch(() => null);
+      if (staffTable?.tailorDepartment?.type?.toUpperCase().startsWith('ENUM')) {
+        await queryInterface.sequelize.query('ALTER TABLE "StaffUsers" ALTER COLUMN "tailorDepartment" TYPE VARCHAR(40) USING "tailorDepartment"::text;');
+        await queryInterface.sequelize.query('DROP TYPE IF EXISTS "enum_StaffUsers_tailorDepartment";');
+        console.log('Schema check: widened StaffUsers.tailorDepartment for owner-managed departments');
+      }
+
+      // When the generic check adds these new columns to an existing live
+      // Departments table, populate only that first deployment. An owner who
+      // later intentionally removes every parameter keeps the empty list.
+      if (addedColumns.includes('Departments.fields')) {
+        await Promise.all(Object.entries(defaultDepartmentFields).map(([key, config]) => queryInterface.bulkUpdate('Departments', {
+          fields: JSON.stringify(config.fields), note: config.note,
+        }, { key })));
+        console.log('Schema check: seeded department parameters');
       }
     }
 
