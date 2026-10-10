@@ -511,6 +511,7 @@ const DEFAULT_INVENTORY_TYPES = [
 
 // Cloth is measured out, everything else is counted.
 const INVENTORY_UNITS = ['yards', 'units'];
+const inventoryDecimal = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 
 // Item photos are stored as data URLs and served back from this origin, so the
 // type is pinned to real raster images. Anything else — text/html, or an SVG,
@@ -2931,12 +2932,12 @@ router.post('/fabrics', asyncHandler(async (req, res) => {
     name: String(name).trim(),
     type: String(type).trim(),
     colour: String(colour || '').trim() || null,
-    quantity: numericQuantity,
+    quantity: inventoryDecimal(numericQuantity),
     unit: String(unit).trim(),
-    cost: numericCost,
+    cost: numericCost === null ? null : inventoryDecimal(numericCost),
     location: String(location || '').trim() || null,
     supplier: String(supplier || '').trim() || null,
-    lowStockThreshold: numericThreshold,
+    lowStockThreshold: inventoryDecimal(numericThreshold),
     image: safeImageDataUrl(image),
   });
   await notifyRoles(
@@ -3039,10 +3040,12 @@ router.post('/fabrics/:id/edit-requests', asyncHandler(async (req, res) => {
   if (Object.prototype.hasOwnProperty.call(changes, 'quantity')) {
     changes.quantity = Number(changes.quantity);
     if (!Number.isFinite(changes.quantity) || changes.quantity < 0) return res.status(400).json({ success: false, message: 'Quantity must be a valid non-negative number.' });
+    changes.quantity = inventoryDecimal(changes.quantity);
   }
   if (Object.prototype.hasOwnProperty.call(changes, 'lowStockThreshold')) {
     changes.lowStockThreshold = Number(changes.lowStockThreshold);
     if (!Number.isFinite(changes.lowStockThreshold) || changes.lowStockThreshold < 0) return res.status(400).json({ success: false, message: 'Low-stock threshold must be a valid non-negative number.' });
+    changes.lowStockThreshold = inventoryDecimal(changes.lowStockThreshold);
   }
   if (!Object.keys(changes).length) return res.status(400).json({ success: false, message: 'At least one proposed change is required.' });
   const request = await InventoryEditRequest.create({ fabricId: fabric.id, requestedBy, requestedByRole, proposedChanges: changes, reason: String(reason).trim() });
@@ -3101,7 +3104,7 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
 
   const lines = requested
     .filter((line) => line?.fabricId)
-    .map((line) => ({ fabricId: line.fabricId, amount: Number(line.quantity) }));
+    .map((line) => ({ fabricId: line.fabricId, amount: inventoryDecimal(line.quantity) }));
 
   if (!token || !tailorName || tailorName === 'Unassigned' || !lines.length
     || lines.some((line) => !Number.isFinite(line.amount) || line.amount <= 0)) {
@@ -3115,7 +3118,7 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
   const merged = [...lines.reduce((totals, line) => {
     totals.set(line.fabricId, (totals.get(line.fabricId) || 0) + line.amount);
     return totals;
-  }, new Map())].map(([fabricId, amount]) => ({ fabricId, amount }));
+  }, new Map())].map(([fabricId, amount]) => ({ fabricId, amount: inventoryDecimal(amount) }));
 
   const sourceInvoice = await findSentInvoiceByTrackingToken(token);
   if (!sourceInvoice) {
@@ -3153,7 +3156,7 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
         error.status = 400;
         throw error;
       }
-      fabrics.push({ fabric, amount: line.amount, remaining: available - line.amount });
+      fabrics.push({ fabric, amount: line.amount, remaining: inventoryDecimal(available - line.amount) });
     }
 
     const allocated = [];
@@ -3654,7 +3657,7 @@ router.patch('/fabrics/:id', asyncHandler(async (req, res) => {
       if (!Number.isFinite(numeric) || numeric < 0) {
         return res.status(400).json({ success: false, message: `${field} must be a valid non-negative number` });
       }
-      changes[field] = numeric;
+      changes[field] = inventoryDecimal(numeric);
       continue;
     }
 
