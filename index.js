@@ -197,10 +197,32 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.API_PORT || 8082;
 
+// Production can set SKIP_SCHEMA_CHECK and does not run sequelize-cli
+// migrations. This repair must therefore sit outside both schema paths: the
+// owner-managed department list cannot be stored in a fixed Postgres enum.
+const ensureDynamicTailorDepartments = async () => {
+  const [columns] = await db.sequelize.query(`
+    SELECT data_type, udt_name
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'StaffUsers'
+      AND column_name = 'tailorDepartment'
+  `);
+  const column = columns[0];
+  if (!column || column.data_type !== 'USER-DEFINED') return;
+
+  await db.sequelize.query(
+    'ALTER TABLE "StaffUsers" ALTER COLUMN "tailorDepartment" TYPE VARCHAR(40) USING "tailorDepartment"::text;'
+  );
+  await db.sequelize.query(`DROP TYPE IF EXISTS "${String(column.udt_name).replace(/"/g, '""')}";`);
+  console.log('Schema repair: widened StaffUsers.tailorDepartment for owner-managed departments');
+};
+
 const startServer = async () => {
   try {
     await db.sequelize.authenticate();
     console.log('Database connection established successfully');
+    await ensureDynamicTailorDepartments();
 
     if (process.env.NODE_ENV === 'development') {
       await db.sequelize.sync({ alter: true });
@@ -262,16 +284,6 @@ const startServer = async () => {
       if (customersTable?.phone?.allowNull === false) {
         await queryInterface.sequelize.query('ALTER TABLE "Customers" ALTER COLUMN "phone" DROP NOT NULL;');
         console.log('Schema check: dropped NOT NULL on Customers.phone');
-      }
-
-      // Tailor departments are owner-managed. Older production databases
-      // still have the original four-value enum because deploys do not run
-      // sequelize-cli migrations; widen it without changing stored values.
-      const staffTable = await queryInterface.describeTable('StaffUsers').catch(() => null);
-      if (staffTable?.tailorDepartment?.type?.toUpperCase().startsWith('ENUM')) {
-        await queryInterface.sequelize.query('ALTER TABLE "StaffUsers" ALTER COLUMN "tailorDepartment" TYPE VARCHAR(40) USING "tailorDepartment"::text;');
-        await queryInterface.sequelize.query('DROP TYPE IF EXISTS "enum_StaffUsers_tailorDepartment";');
-        console.log('Schema check: widened StaffUsers.tailorDepartment for owner-managed departments');
       }
 
       // When the generic check adds these new columns to an existing live
