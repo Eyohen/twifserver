@@ -684,8 +684,10 @@ const formatSentInvoice = (invoice) => {
     })),
     // The full document fields, so an invoice can be re-rendered as a PDF or
     // resent from a list without first reopening the create screen.
-    email: invoice.customerEmail || '',
-    phone: invoice.customerPhone || '',
+    email: invoice.customerEmail || payload.customer?.email || '',
+    customerEmail: invoice.customerEmail || payload.customer?.email || '',
+    phone: invoice.customerPhone || payload.customer?.phone || '',
+    customerPhone: invoice.customerPhone || payload.customer?.phone || '',
     items: Array.isArray(payload.items) ? payload.items : [],
     subtotal: Number(payload.subtotal || 0),
     eliteDiscountAmount: Number(payload.eliteDiscountAmount || 0),
