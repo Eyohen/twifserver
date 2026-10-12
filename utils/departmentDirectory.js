@@ -17,6 +17,11 @@ const DEFAULT_DEPARTMENTS = [
 
 let cache = new Map(DEFAULT_DEPARTMENTS.map((department) => [department.key, { ...department, status: 'active' }]));
 
+const withAdditionalInformation = (fields = []) => {
+  const configured = Array.isArray(fields) ? fields.filter((field) => field?.key !== 'additionalInformation') : [];
+  return [...configured, { key: 'additionalInformation', label: 'Additional Information', required: false }];
+};
+
 const ensureSeeded = async () => {
   const existing = await db.Department.count();
   if (existing > 0) return;
@@ -31,7 +36,10 @@ const ensureSeeded = async () => {
 const refreshDepartmentCache = async () => {
   await ensureSeeded();
   const departments = await db.Department.findAll({ order: [['createdAt', 'ASC']] });
-  cache = new Map(departments.map((department) => [department.key, department.get({ plain: true })]));
+  cache = new Map(departments.map((department) => {
+    const plain = department.get({ plain: true });
+    return [plain.key, { ...plain, fields: withAdditionalInformation(plain.fields) }];
+  }));
   return cache;
 };
 
@@ -44,4 +52,5 @@ module.exports = {
   refreshDepartmentCache,
   listDepartments,
   departmentKeys,
+  withAdditionalInformation,
 };

@@ -9,7 +9,7 @@ const multer = require('multer');
 const db = require('../models');
 const { createTwifInvoiceHtml, getTwifStoreDetails } = require('../utils/twifInvoiceTemplate');
 const { refreshStoreCache, listStores, storeKeys, normalizeStoreKey } = require('../utils/storeDirectory');
-const { refreshDepartmentCache, listDepartments } = require('../utils/departmentDirectory');
+const { refreshDepartmentCache, listDepartments, withAdditionalInformation } = require('../utils/departmentDirectory');
 const { sendEmail } = require('../services/email.service');
 const cloudinaryService = require('../services/cloudinary.service');
 
@@ -879,6 +879,7 @@ router.post('/departments', requireRole('owner', 'admin'), asyncHandler(async (r
     key,
     name: String(name).trim(),
     status: 'active',
+    fields: withAdditionalInformation(),
   });
   await refreshDepartmentCache();
 
@@ -902,16 +903,11 @@ router.patch('/departments/:id', requireRole('owner', 'admin'), asyncHandler(asy
   let cleanFields;
   if (fields !== undefined) {
     if (!Array.isArray(fields)) return res.status(400).json({ success: false, message: 'Department parameters must be a list.' });
-    cleanFields = fields.map((entry) => ({
+    cleanFields = withAdditionalInformation(fields.map((entry) => ({
       key: slugifyDepartmentKey(entry?.key || entry?.label).replace(/-([a-z0-9])/g, (_, letter) => letter.toUpperCase()),
       label: String(entry?.label || '').trim().slice(0, 120),
       required: entry?.required !== false,
-    }));
-    cleanFields.sort((left, right) => {
-      if (left.key === 'additionalInformation') return 1;
-      if (right.key === 'additionalInformation') return -1;
-      return 0;
-    });
+    })));
     if (cleanFields.some((entry) => !entry.key || !entry.label)) {
       return res.status(400).json({ success: false, message: 'Every parameter needs a name.' });
     }
