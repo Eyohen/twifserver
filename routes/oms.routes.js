@@ -1826,7 +1826,6 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
       message: 'Invoice not found',
     });
   }
-
   const payload = invoice.payload || {};
 
   if (status === 'Approved' && payload.accountApprovalStatus === 'Approved') {
@@ -2135,6 +2134,10 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
     });
   }
 
+  if (req.staff?.role === 'store_manager' && req.staff.store !== 'all' && invoice.store !== req.staff.store) {
+    return res.status(403).json({ success: false, message: 'You may only create order sheets for your assigned store.' });
+  }
+
   const payload = invoice.payload || {};
   const resolvedToken = payload.trackingToken || token || trackingTokenFromUrl(payload.trackingUrl) || trackingToken();
   const nextPayload = {
@@ -2144,6 +2147,9 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
     orderSheet: {
       ...(payload.orderSheet || {}),
       ...orderSheet,
+      // An order sheet belongs to its invoice's store. Never trust a second
+      // client-selected location that can disagree with the invoice record.
+      store: storeShortLabel(invoice.store),
       status: orderSheet.status || payload.orderSheet?.status || 'Order Sheet Confirmed',
       // Kept from the first save, so lead time is measured from the day the
       // order could have been worked rather than the day the invoice was sent.
