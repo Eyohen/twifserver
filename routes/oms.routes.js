@@ -907,6 +907,11 @@ router.patch('/departments/:id', requireRole('owner', 'admin'), asyncHandler(asy
       label: String(entry?.label || '').trim().slice(0, 120),
       required: entry?.required !== false,
     }));
+    cleanFields.sort((left, right) => {
+      if (left.key === 'additionalInformation') return 1;
+      if (right.key === 'additionalInformation') return -1;
+      return 0;
+    });
     if (cleanFields.some((entry) => !entry.key || !entry.label)) {
       return res.status(400).json({ success: false, message: 'Every parameter needs a name.' });
     }
