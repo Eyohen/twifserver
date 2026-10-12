@@ -656,6 +656,10 @@ const formatSentInvoice = (invoice) => {
     paymentMethod: payload.paymentMethod ? paymentMethodLabel(payload.paymentMethod) : 'Transfer',
     orderStatus: invoice.orderStatus || paymentStatusLabel(invoice.paymentStatus),
     accountApprovalStatus: payload.accountApprovalStatus || 'Pending Accounts',
+    accountApprovalNote: payload.accountApprovalNote || '',
+    storeManagerClarification: payload.storeManagerClarification || '',
+    clarifiedBy: payload.clarifiedBy || '',
+    clarifiedAt: payload.clarifiedAt || null,
     // The timeline showed a hollow marker and a dash whatever the invoice's
     // state, because these never reached it.
     accountApprovedAt: payload.accountApprovedAt || null,
@@ -1816,6 +1820,9 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
   if (!['Approved', 'Flagged', 'Rejected', 'Pending Accounts'].includes(status)) {
     return res.status(400).json({ success: false, message: 'Status must be Approved, Flagged, Rejected, or Pending Accounts.' });
   }
+  if (status === 'Flagged' && !String(note).trim()) {
+    return res.status(400).json({ success: false, message: 'Enter what the Store Manager needs to clarify.' });
+  }
   const invoice = await SentInvoice.findOne({
     where: { invoiceNumber: req.params.invoiceNumber },
   });
@@ -2449,15 +2456,22 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
 router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_manager', 'accounts'), asyncHandler(async (req, res) => {
   const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
   if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
-  if (!mayEditInvoice(req.staff, invoice)) {
+  const payload = invoice.payload || {};
+  const isFlaggedClarification = payload.accountApprovalStatus === 'Flagged' && req.staff?.role === 'store_manager';
+  const managerOwnsStore = req.staff?.store === 'all'
+    || normalizeStoreKey(invoice.store) === normalizeStoreKey(req.staff?.store);
+  if (!mayEditInvoice(req.staff, invoice) && !(isFlaggedClarification && managerOwnsStore)) {
     return res.status(403).json({
       success: false,
       message: 'Only the person who raised this invoice, or an Owner or Admin, can change it',
     });
   }
 
-  const payload = invoice.payload || {};
-  const { items, notes, customerName, customerPhone, customerEmail, store, dueDate, removePaymentEvidenceAt, addPaymentEvidence } = req.body;
+  const { items, notes, customerName, customerPhone, customerEmail, store, dueDate, removePaymentEvidenceAt, addPaymentEvidence, clarification } = req.body;
+  const cleanClarification = String(clarification || '').trim();
+  if (isFlaggedClarification && !cleanClarification) {
+    return res.status(400).json({ success: false, message: 'Explain the clarification before returning this invoice to Accounts.' });
+  }
   if (customerPhone !== undefined) {
     const invalidPhone = phoneProblem(customerPhone);
     if (invalidPhone) return res.status(400).json({ success: false, message: invalidPhone });
@@ -2541,6 +2555,12 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
     ...(notes !== undefined ? { notes } : {}),
     ...(dueDate !== undefined ? { dueDate } : {}),
     ...(changingEvidence ? { paymentEvidence: nextEvidence } : {}),
+    ...(isFlaggedClarification ? {
+      accountApprovalStatus: 'Pending Accounts',
+      storeManagerClarification: cleanClarification.slice(0, 2000),
+      clarifiedBy: req.staff.displayName,
+      clarifiedAt: new Date().toISOString(),
+    } : {}),
     editedBy: req.staff.displayName,
     editedAt: new Date().toISOString(),
   };
@@ -2555,7 +2575,9 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
   });
 
   await notifyRoles(['accounts', 'owner', 'admin'],
-    `${req.staff.displayName} edited invoice ${invoice.invoiceNumber}.`,
+    isFlaggedClarification
+      ? `${req.staff.displayName} clarified flagged invoice ${invoice.invoiceNumber}. It is ready for review again.`
+      : `${req.staff.displayName} edited invoice ${invoice.invoiceNumber}.`,
     { invoiceNumber: invoice.invoiceNumber, event: 'invoice_edited' });
 
   res.json({ success: true, data: { invoice: formatSentInvoice(invoice) } });
