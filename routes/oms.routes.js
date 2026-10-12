@@ -2633,7 +2633,29 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
   if (!invoice) return res.status(404).json({ success: false, message: 'Order not found' });
 
   const sheet = orderSheetOf(invoice);
-  const items = Array.isArray(sheet.items) && sheet.items.length ? [...sheet.items] : [{ item: sheet.item || '' }];
+  // Legacy sheets stored fabric at the order level. The first assignment
+  // promotes them to an item array, so copy those fields into item 0 rather
+  // than silently dropping the selected fabric during that conversion.
+  const legacyFabrics = Array.isArray(sheet.fabrics) && sheet.fabrics.length
+    ? sheet.fabrics
+    : (sheet.fabricId || sheet.fabric === 'Client supplied'
+      ? [{
+        fabricId: sheet.fabricId || '',
+        name: sheet.fabric || '',
+        unit: sheet.fabricUnit || '',
+        quantity: sheet.fabricUsage || '',
+        clientSupplied: sheet.fabric === 'Client supplied',
+      }]
+      : []);
+  const items = Array.isArray(sheet.items) && sheet.items.length ? [...sheet.items] : [{
+    item: sheet.item || '',
+    delivery: sheet.delivery || '',
+    fabrics: legacyFabrics,
+    fabric: sheet.fabric || '',
+    fabricId: sheet.fabricId || '',
+    fabricUnit: sheet.fabricUnit || '',
+    fabricUsage: sheet.fabricUsage || '',
+  }];
   const requested = Array.isArray(req.body?.items) ? req.body.items : [];
 
   for (const entry of requested) {
@@ -2667,6 +2689,7 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
       ...items[index],
       tailors: names,
       ...(entry.tailorDueDate !== undefined ? { tailorDueDate: entry.tailorDueDate } : {}),
+      ...(Array.isArray(entry.fabrics) ? { fabrics: entry.fabrics } : {}),
     };
   }
 
