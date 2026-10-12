@@ -1820,9 +1820,6 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
   if (!['Approved', 'Flagged', 'Rejected', 'Pending Accounts'].includes(status)) {
     return res.status(400).json({ success: false, message: 'Status must be Approved, Flagged, Rejected, or Pending Accounts.' });
   }
-  if (status === 'Flagged' && !String(note).trim()) {
-    return res.status(400).json({ success: false, message: 'Enter what the Store Manager needs to clarify.' });
-  }
   const invoice = await SentInvoice.findOne({
     where: { invoiceNumber: req.params.invoiceNumber },
   });
