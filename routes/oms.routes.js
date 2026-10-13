@@ -1712,12 +1712,43 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   // One payload for the document, the plain-text alternative and the record, so
   // the three cannot disagree about what is still owed.
   payload.amountReceived = amountAtCreation;
-  const html = createTwifInvoiceHtml(payload);
   // Verified against the table rather than trusted as-is: a stale or
   // tampered id must not silently attach this invoice to the wrong customer.
-  const customerId = payload.customer?.id
-    ? (await Customer.findByPk(payload.customer.id, { attributes: ['id'] }))?.id || null
+  const customerRecord = payload.customer?.id
+    ? await Customer.findByPk(payload.customer.id, { attributes: ['id', 'storeCreditBalance'] })
     : null;
+  const customerId = customerRecord?.id || null;
+  const requestedStoreCredit = Number(payload.storeCreditApplied || 0);
+  if (!Number.isFinite(requestedStoreCredit) || requestedStoreCredit < 0) {
+    return res.status(400).json({ success: false, message: 'Store credit must be a valid positive amount.' });
+  }
+  if (requestedStoreCredit > 0 && !customerRecord) {
+    return res.status(409).json({ success: false, message: 'Select a registered customer before applying store credit.' });
+  }
+
+  const existingInvoice = await SentInvoice.findOne({ where: { invoiceNumber: payload.invoiceNumber } });
+  const existingCredit = Number(existingInvoice?.payload?.storeCreditApplied || 0);
+  if (existingInvoice && existingCredit !== requestedStoreCredit) {
+    return res.status(409).json({ success: false, message: 'Store credit cannot be changed after an invoice has been created.' });
+  }
+  if (requestedStoreCredit > 0 && !existingInvoice) {
+    const available = Number(customerRecord.storeCreditBalance || 0);
+    if (requestedStoreCredit > available) {
+      return res.status(409).json({
+        success: false,
+        message: available > 0
+          ? `This customer only has ${naira(available)} in store credit.`
+          : 'This customer has no store credit.',
+      });
+    }
+    payload.storeCreditValidated = true;
+    payload.storeCreditBalanceBefore = available;
+  } else if (existingInvoice?.payload?.storeCreditValidated) {
+    payload.storeCreditValidated = true;
+    payload.storeCreditBalanceBefore = existingInvoice.payload.storeCreditBalanceBefore;
+  }
+
+  const html = createTwifInvoiceHtml(payload);
   const invoiceRecord = {
     invoiceNumber: payload.invoiceNumber,
     store: normalizeStoreKey(payload.store),
@@ -1754,10 +1785,28 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     },
   };
 
-  // Persist the invoice and customer identity before contacting the email
-  // provider. A delivery failure must not make the customer disappear.
-  const existingInvoice = await SentInvoice.findOne({ where: { invoiceNumber: payload.invoiceNumber } });
-  await SentInvoice.upsert(invoiceRecord);
+  // Reserve the customer's credit and persist the invoice together. This is
+  // atomic, so two invoices cannot spend the same balance and a failed invoice
+  // save cannot consume credit without leaving a record behind.
+  await db.sequelize.transaction(async (transaction) => {
+    if (requestedStoreCredit > 0 && !existingInvoice) {
+      const lockedCustomer = await Customer.findByPk(customerId, {
+        attributes: ['id', 'storeCreditBalance'],
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      const available = Number(lockedCustomer?.storeCreditBalance || 0);
+      if (!lockedCustomer || requestedStoreCredit > available) {
+        const error = new Error(available > 0
+          ? `This customer only has ${naira(available)} in store credit.`
+          : 'This customer has no store credit.');
+        error.status = 409;
+        throw error;
+      }
+      await lockedCustomer.update({ storeCreditBalance: available - requestedStoreCredit }, { transaction });
+    }
+    await SentInvoice.upsert(invoiceRecord, { transaction });
+  });
   if (!existingInvoice) {
     await notifyRoles(
       ['accounts'],
@@ -1831,6 +1880,17 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
     });
   }
   const payload = invoice.payload || {};
+
+  // Older clients could type any store-credit figure without proving the
+  // customer owned it. Never let Accounts approve one of those invoices: new
+  // invoices receive this marker only after the balance is checked and
+  // reserved atomically during creation.
+  if (status === 'Approved' && Number(payload.storeCreditApplied || 0) > 0 && !payload.storeCreditValidated) {
+    return res.status(409).json({
+      success: false,
+      message: 'The store credit on this invoice was not verified against the customer. Correct the invoice before approving it.',
+    });
+  }
 
   if (status === 'Approved' && payload.accountApprovalStatus === 'Approved') {
     return res.status(409).json({ success: false, message: 'This invoice has already been approved' });
