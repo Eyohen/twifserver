@@ -50,6 +50,13 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       defaultValue: 0,
     },
+    // Quantity held at each Store.key. `quantity` remains the company-wide
+    // total for existing allocation/reporting code and is kept in sync.
+    stockByStore: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: {},
+    },
     unit: {
       type: DataTypes.STRING(24),
       allowNull: false,

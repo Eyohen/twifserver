@@ -985,7 +985,7 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
     pinHash,
     displayName,
     role,
-    store,
+    store: role === 'inventory_manager' ? 'all' : store,
     dateOfBirth: birthDate,
     tailorDepartment,
     tailorGrade,
@@ -1038,6 +1038,7 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
   if (editProblem) return res.status(400).json({ success: false, message: editProblem });
 
   const resultingRole = updates.role || staffUser.role;
+  if (resultingRole === 'inventory_manager') updates.store = 'all';
   const resultingDepartment = 'tailorDepartment' in updates ? updates.tailorDepartment : staffUser.tailorDepartment;
   if (!updates.displayName && Object.prototype.hasOwnProperty.call(updates, 'displayName')) {
     return res.status(400).json({ success: false, message: 'Staff name is required' });
@@ -2994,7 +2995,7 @@ router.delete('/inventory-types/:name', asyncHandler(async (req, res) => {
 }));
 
 router.post('/fabrics', asyncHandler(async (req, res) => {
-  const { sku, name, type, colour, quantity = 0, unit = 'units', cost, location, supplier, lowStockThreshold = 0, image } = req.body;
+  const { sku, name, type, colour, quantity = 0, unit = 'units', cost, location, store, supplier, lowStockThreshold = 0, image } = req.body;
   const numericQuantity = Number(quantity);
   const numericThreshold = Number(lowStockThreshold);
   const numericCost = cost === undefined || cost === null || cost === '' ? null : Number(cost);
@@ -3038,12 +3039,18 @@ router.post('/fabrics', asyncHandler(async (req, res) => {
     }
   }
 
+  const storeKey = String(store || '').trim().toLowerCase();
+  if (numericQuantity > 0 && !storeKeys({ activeOnly: true }).includes(storeKey)) {
+    return res.status(400).json({ success: false, message: 'Select the store receiving this stock.' });
+  }
+  const stockByStore = numericQuantity > 0 ? { [storeKey]: inventoryDecimal(numericQuantity) } : {};
   const fabric = await Fabric.create({
     sku: trimmedSku || null,
     name: String(name).trim(),
     type: String(type).trim(),
     colour: String(colour || '').trim() || null,
     quantity: inventoryDecimal(numericQuantity),
+    stockByStore,
     unit: String(unit).trim(),
     cost: numericCost === null ? null : inventoryDecimal(numericCost),
     location: String(location || '').trim() || null,
@@ -3146,12 +3153,20 @@ router.post('/fabrics/:id/edit-requests', asyncHandler(async (req, res) => {
   const { proposedChanges = {}, reason, requestedBy = 'Inventory Manager', requestedByRole = 'inventory_manager' } = req.body;
   if (requestedByRole !== 'inventory_manager') return res.status(403).json({ success: false, message: 'Only the Inventory Manager can submit inventory edit requests.' });
   if (!String(reason || '').trim()) return res.status(400).json({ success: false, message: 'A reason for the requested edit is required.' });
-  const allowed = ['name', 'type', 'unit', 'supplier', 'quantity', 'lowStockThreshold'];
+  const allowed = ['name', 'type', 'unit', 'supplier', 'quantity', 'stockByStore', 'lowStockThreshold'];
   const changes = Object.fromEntries(Object.entries(proposedChanges).filter(([key]) => allowed.includes(key)));
   if (Object.prototype.hasOwnProperty.call(changes, 'quantity')) {
     changes.quantity = Number(changes.quantity);
     if (!Number.isFinite(changes.quantity) || changes.quantity < 0) return res.status(400).json({ success: false, message: 'Quantity must be a valid non-negative number.' });
     changes.quantity = inventoryDecimal(changes.quantity);
+  }
+  if (Object.prototype.hasOwnProperty.call(changes, 'stockByStore')) {
+    const validBalanceKeys = new Set([...storeKeys(), 'storage']);
+    const balances = Object.fromEntries(Object.entries(changes.stockByStore || {}).map(([key, value]) => [
+      String(key).trim().toLowerCase(), inventoryDecimal(Number(value)),
+    ]).filter(([key, value]) => validBalanceKeys.has(key) && Number.isFinite(value) && value >= 0));
+    changes.stockByStore = balances;
+    changes.quantity = inventoryDecimal(Object.values(balances).reduce((sum, value) => sum + Number(value), 0));
   }
   if (Object.prototype.hasOwnProperty.call(changes, 'lowStockThreshold')) {
     changes.lowStockThreshold = Number(changes.lowStockThreshold);
@@ -3261,18 +3276,25 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
         error.status = 404;
         throw error;
       }
-      const available = Number(fabric.quantity || 0);
+      const allocationStore = normalizeStoreKey(invoice.store);
+      const balances = fabric.stockByStore || {};
+      const hasStoreBalances = Object.keys(balances).length > 0;
+      const available = hasStoreBalances ? Number(balances[allocationStore] || 0) : Number(fabric.quantity || 0);
       if (line.amount > available) {
-        const error = new Error(`Only ${available} ${fabric.unit} of ${fabric.name} is available`);
+        const error = new Error(`Only ${available} ${fabric.unit} of ${fabric.name} is available at ${storeShortLabel(allocationStore)}`);
         error.status = 400;
         throw error;
       }
-      fabrics.push({ fabric, amount: line.amount, remaining: inventoryDecimal(available - line.amount) });
+      fabrics.push({ fabric, amount: line.amount, remaining: inventoryDecimal(available - line.amount), allocationStore, balances, hasStoreBalances });
     }
 
     const allocated = [];
     for (const entry of fabrics) {
-      await entry.fabric.update({ quantity: entry.remaining }, { transaction });
+      const nextTotal = inventoryDecimal(Number(entry.fabric.quantity || 0) - entry.amount);
+      await entry.fabric.update({
+        quantity: nextTotal,
+        ...(entry.hasStoreBalances ? { stockByStore: { ...entry.balances, [entry.allocationStore]: entry.remaining } } : {}),
+      }, { transaction });
       await InventoryAllocation.create({
         fabricId: entry.fabric.id,
         fabricName: entry.fabric.name,
@@ -3281,6 +3303,7 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
         invoiceNumber: invoice.invoiceNumber,
         customerName: invoice.customerName,
         tailorName,
+        store: entry.allocationStore,
         itemIndex,
         itemName,
         // Unique per row — per item too, now, so the same fabric allocated
@@ -3730,6 +3753,7 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
           invoiceNumber: allocation.invoiceNumber,
           customerName: allocation.customerName,
           tailorName: allocation.tailorName,
+          store: allocation.store,
         })),
       },
     },
