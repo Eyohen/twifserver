@@ -2343,7 +2343,7 @@ const measurementsFromCustomer = async (orderSheet) => {
   const customer = await Customer.findByPk(orderSheet.customerId);
   const stored = customer?.measurements || {};
   const measurementDetails = Object.fromEntries(
-    Object.entries(stored).filter(([key, value]) => key !== 'profile' && String(value ?? '').trim())
+    Object.entries(stored).filter(([key, value]) => !['profile', 'measuredAt', 'measuredBy'].includes(key) && String(value ?? '').trim())
   );
   if (!Object.keys(measurementDetails).length) return null;
 
@@ -2413,7 +2413,15 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   // returned all pass through this same endpoint — but running production
   // is still not a reason to move money or reassign whose invoice this is.
   // Only the creator/Owner/Admin branch above may touch these.
-  const INVOICE_OWNED_FIELDS = ['paid', 'amount', 'customerId', 'customer', 'phone', 'store', 'invoiceNumber', 'trackingToken', 'trackingUrl', 'requiresAccountApproval', 'payment'];
+  const INVOICE_OWNED_FIELDS = [
+    'paid', 'amount', 'customerId', 'customer', 'phone', 'store', 'invoiceNumber',
+    'trackingToken', 'trackingUrl', 'requiresAccountApproval', 'payment',
+    // Measurements and Fit Note are captured by the store when the order is
+    // raised. Production sends its whole local job object during assignment
+    // updates, so accepting these echoed fields could turn a generated
+    // measurement summary into a note that nobody entered.
+    'measurements', 'measurementDetails', 'fitNote',
+  ];
   const incomingChanges = isTailorOnly
     ? { status: req.body.status }
     : (isPrivilegedEditor
