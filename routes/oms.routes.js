@@ -3432,9 +3432,22 @@ router.patch('/notifications/read-all', asyncHandler(async (req, res) => {
 }));
 
 router.get('/fabrics/allocations', asyncHandler(async (req, res) => {
+  const from = req.query.from ? new Date(req.query.from) : null;
+  const to = req.query.to ? new Date(req.query.to) : null;
+  if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime())) || (from && to && from >= to)) {
+    return res.status(400).json({ success: false, message: 'Allocation date range is invalid.' });
+  }
+  const createdAt = {
+    ...(from ? { [Op.gte]: from } : {}),
+    ...(to ? { [Op.lt]: to } : {}),
+  };
+  const ranged = from || to;
   const allocations = await InventoryAllocation.findAll({
+    ...(ranged ? { where: { createdAt } } : {}),
     order: [['createdAt', 'DESC']],
-    limit: 250,
+    // The dashboard's general activity feed stays bounded. A deliberate date
+    // range (used by "Today's Allocations") returns the complete period.
+    ...(ranged ? {} : { limit: 250 }),
   });
   res.json({ success: true, data: { allocations } });
 }));
