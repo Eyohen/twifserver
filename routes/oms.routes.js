@@ -2364,6 +2364,29 @@ const mayEditInvoice = (staff, invoice) => {
   return Boolean(invoice.createdByStaffId) && invoice.createdByStaffId === staff?.id;
 };
 
+const PRODUCTION_ASSIGNMENT_LOCKED_STATUSES = new Set(['In Progress', 'Ready', 'Ready for Collection']);
+const productionAssignmentSnapshot = (orderSheet = {}) => ({
+  tailor: orderSheet.tailor || '',
+  tailors: Array.isArray(orderSheet.tailors) ? orderSheet.tailors : [],
+  fabric: orderSheet.fabric || '',
+  fabricId: orderSheet.fabricId || '',
+  fabricUnit: orderSheet.fabricUnit || '',
+  fabricUsage: orderSheet.fabricUsage ?? '',
+  fabrics: Array.isArray(orderSheet.fabrics) ? orderSheet.fabrics : [],
+  items: (Array.isArray(orderSheet.items) ? orderSheet.items : []).map((item) => ({
+    tailor: item.tailor || '',
+    tailors: Array.isArray(item.tailors) ? item.tailors : [],
+    fabric: item.fabric || '',
+    fabricId: item.fabricId || '',
+    fabricUnit: item.fabricUnit || '',
+    fabricUsage: item.fabricUsage ?? '',
+    fabrics: Array.isArray(item.fabrics) ? item.fabrics : [],
+  })),
+});
+const productionAssignmentChanged = (before, after) => (
+  JSON.stringify(productionAssignmentSnapshot(before)) !== JSON.stringify(productionAssignmentSnapshot(after))
+);
+
 router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   const invoice = await findSentInvoiceByTrackingToken(req.params.token);
 
@@ -2428,9 +2451,17 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       ? req.body
       : Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => !INVOICE_OWNED_FIELDS.includes(key))));
 
+  const proposedOrderSheet = { ...previousOrderSheet, ...incomingChanges };
+  if (PRODUCTION_ASSIGNMENT_LOCKED_STATUSES.has(previousOrderSheet.status)
+      && productionAssignmentChanged(previousOrderSheet, proposedOrderSheet)) {
+    return res.status(409).json({
+      success: false,
+      message: 'Fabric and tailor assignments are locked once production is in progress',
+    });
+  }
+
   const nextOrderSheet = {
-    ...previousOrderSheet,
-    ...incomingChanges,
+    ...proposedOrderSheet,
     updatedAt: new Date().toISOString(),
   };
 
@@ -2711,6 +2742,12 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
   if (!invoice) return res.status(404).json({ success: false, message: 'Order not found' });
 
   const sheet = orderSheetOf(invoice);
+  if (PRODUCTION_ASSIGNMENT_LOCKED_STATUSES.has(sheet.status)) {
+    return res.status(409).json({
+      success: false,
+      message: 'Tailor assignments are locked once production is in progress',
+    });
+  }
   const previouslyAssigned = new Set([
     ...(Array.isArray(sheet.items) ? sheet.items.flatMap((item) => item.tailors || []) : []),
     ...(Array.isArray(sheet.tailors) ? sheet.tailors : []),
@@ -3297,6 +3334,11 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
     const invoice = await SentInvoice.findByPk(sourceInvoice.id, { transaction, lock: transaction.LOCK.UPDATE });
     const payload = invoice.payload || {};
     const orderSheet = payload.orderSheet || {};
+    if (PRODUCTION_ASSIGNMENT_LOCKED_STATUSES.has(orderSheet.status)) {
+      const error = new Error('Fabric allocation is locked once production is in progress');
+      error.status = 409;
+      throw error;
+    }
     const items = Array.isArray(orderSheet.items) ? orderSheet.items : null;
     const targetItem = items && itemIndex !== null ? items[itemIndex] : null;
 
