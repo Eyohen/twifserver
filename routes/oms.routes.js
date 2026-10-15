@@ -2488,10 +2488,19 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   });
 
   if (nextOrderSheet.tailor && nextOrderSheet.tailor !== 'Unassigned' && nextOrderSheet.tailor !== previousOrderSheet.tailor) {
+    const assignedTailor = await StaffUser.findOne({
+      where: { displayName: nextOrderSheet.tailor, role: 'tailor', status: 'active' },
+      attributes: ['id'],
+    });
     await notifyRoles(
       ['tailor'],
       `You were assigned ${nextOrderSheet.item || 'an order'} for ${invoice.customerName} (${invoice.invoiceNumber}).`,
-      { invoiceNumber: invoice.invoiceNumber, tailorName: nextOrderSheet.tailor, event: 'tailor_assigned' }
+      {
+        invoiceNumber: invoice.invoiceNumber,
+        tailorId: assignedTailor?.id,
+        tailorName: nextOrderSheet.tailor,
+        event: 'tailor_assigned',
+      }
     );
   }
   const nextIsReady = ['Ready', 'Ready for Collection'].includes(nextOrderSheet.status);
@@ -2702,6 +2711,11 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
   if (!invoice) return res.status(404).json({ success: false, message: 'Order not found' });
 
   const sheet = orderSheetOf(invoice);
+  const previouslyAssigned = new Set([
+    ...(Array.isArray(sheet.items) ? sheet.items.flatMap((item) => item.tailors || []) : []),
+    ...(Array.isArray(sheet.tailors) ? sheet.tailors : []),
+    ...(sheet.tailor && sheet.tailor !== 'Unassigned' ? [sheet.tailor] : []),
+  ]);
   // Legacy sheets stored fabric at the order level. The first assignment
   // promotes them to an item array, so copy those fields into item 0 rather
   // than silently dropping the selected fabric during that conversion.
@@ -2798,10 +2812,21 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
   };
   await saveOrderSheet(invoice, nextSheet);
 
-  for (const name of everyone) {
+  const newlyAssigned = everyone.filter((name) => !previouslyAssigned.has(name));
+  const assignedStaff = newlyAssigned.length ? await StaffUser.findAll({
+    where: { displayName: { [Op.in]: newlyAssigned }, role: 'tailor', status: 'active' },
+    attributes: ['id', 'displayName'],
+  }) : [];
+  const tailorIdsByName = new Map(assignedStaff.map((tailor) => [tailor.displayName, tailor.id]));
+  for (const name of newlyAssigned) {
     await notifyRoles(['tailor'],
       `You were assigned work on ${invoice.customerName}'s order (${invoice.invoiceNumber}).`,
-      { invoiceNumber: invoice.invoiceNumber, tailorName: name, event: 'tailor_assigned' });
+      {
+        invoiceNumber: invoice.invoiceNumber,
+        tailorId: tailorIdsByName.get(name),
+        tailorName: name,
+        event: 'tailor_assigned',
+      });
   }
 
   res.json({ success: true, data: { orderSheet: nextSheet } });
@@ -2890,13 +2915,21 @@ router.post('/jobs/:invoiceNumber/comments', asyncHandler(async (req, res) => {
     { invoiceNumber, event: 'job_comment' }
   );
 
-  // A tailor's notifications are addressed by name through metadata.tailorName,
-  // which is how the inbox filters them, rather than by a recipient column.
-  if (sheet.tailor && sheet.tailor !== 'Unassigned' && authorName !== sheet.tailor) {
+  const assignedTailorNames = [...new Set([
+    ...(Array.isArray(sheet.items) ? sheet.items.flatMap((item) => item.tailors || []) : []),
+    ...(Array.isArray(sheet.tailors) ? sheet.tailors : []),
+    ...(sheet.tailor && sheet.tailor !== 'Unassigned' ? [sheet.tailor] : []),
+  ].filter((name) => name && name !== authorName))];
+  const assignedTailors = assignedTailorNames.length ? await StaffUser.findAll({
+    where: { displayName: { [Op.in]: assignedTailorNames }, role: 'tailor', status: 'active' },
+    attributes: ['id', 'displayName'],
+  }) : [];
+  const tailorIdsByName = new Map(assignedTailors.map((tailor) => [tailor.displayName, tailor.id]));
+  for (const tailorName of assignedTailorNames) {
     await notifyRoles(
       ['tailor'],
       `${authorName} commented on ${invoiceNumber}: ${body.length > 90 ? `${body.slice(0, 90)}…` : body}`,
-      { invoiceNumber, event: 'job_comment', tailorName: sheet.tailor }
+      { invoiceNumber, event: 'job_comment', tailorId: tailorIdsByName.get(tailorName), tailorName }
     );
   }
 
@@ -3394,17 +3427,52 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
   res.json({ success: true, data: allocationResult });
 }));
 
+const notificationsForTailor = async (items, staff, { deduplicate = false } = {}) => {
+  const invoiceNumbers = [...new Set(items
+    .map((item) => item.metadata?.invoiceNumber)
+    .filter(Boolean))];
+  const invoices = invoiceNumbers.length ? await SentInvoice.findAll({
+    where: { invoiceNumber: { [Op.in]: invoiceNumbers } },
+    attributes: ['invoiceNumber', 'payload'],
+  }) : [];
+  const invoicesByNumber = new Map(invoices.map((invoice) => [invoice.invoiceNumber, invoice]));
+
+  const visible = items.filter((item) => {
+    const metadata = item.metadata || {};
+    const addressedToTailor = metadata.tailorId
+      ? String(metadata.tailorId) === String(staff.id)
+      : metadata.tailorName
+        ? metadata.tailorName === staff.displayName
+        : false;
+    const invoice = metadata.invoiceNumber ? invoicesByNumber.get(metadata.invoiceNumber) : null;
+
+    // Old rows did not always identify their intended tailor. They are safe to
+    // retain only when the referenced order proves it belongs to this tailor.
+    if (invoice) return tailorHasDepartmentWork(staff, invoice.payload?.orderSheet) && (addressedToTailor || (!metadata.tailorId && !metadata.tailorName));
+    return addressedToTailor;
+  });
+
+  if (!deduplicate) return visible;
+  const seenAssignments = new Set();
+  return visible.filter((item) => {
+    if (item.metadata?.event !== 'tailor_assigned') return true;
+    const key = item.metadata?.invoiceNumber || item.id;
+    if (seenAssignments.has(key)) return false;
+    seenAssignments.add(key);
+    return true;
+  });
+};
+
 router.get('/notifications', asyncHandler(async (req, res) => {
-  const role = String(req.query.role || '');
-  const displayName = String(req.query.name || '').trim();
+  const role = req.staff?.role;
   if (!role) return res.status(400).json({ success: false, message: 'role is required' });
   let items = await OmsNotification.findAll({
     where: { recipientRole: role },
     order: [['createdAt', 'DESC']],
     limit: 100,
   });
-  if (role === 'tailor' && displayName) {
-    items = items.filter((item) => !item.metadata?.tailorName || item.metadata.tailorName === displayName);
+  if (role === 'tailor') {
+    items = await notificationsForTailor(items, req.staff, { deduplicate: true });
   }
   res.json({
     success: true,
@@ -3416,18 +3484,19 @@ router.get('/notifications', asyncHandler(async (req, res) => {
 }));
 
 router.patch('/notifications/read-all', asyncHandler(async (req, res) => {
-  const role = String(req.body.role || '');
-  const displayName = String(req.body.name || '').trim();
+  const role = req.staff?.role;
   if (!role) return res.status(400).json({ success: false, message: 'role is required' });
 
   let items = await OmsNotification.findAll({ where: { recipientRole: role, isRead: false } });
-  if (role === 'tailor' && displayName) {
-    items = items.filter((item) => !item.metadata?.tailorName || item.metadata.tailorName === displayName);
+  if (role === 'tailor') {
+    items = await notificationsForTailor(items, req.staff);
   }
-  await OmsNotification.update(
-    { isRead: true },
-    { where: { id: items.map((item) => item.id) } }
-  );
+  if (items.length) {
+    await OmsNotification.update(
+      { isRead: true },
+      { where: { id: items.map((item) => item.id) } }
+    );
+  }
   res.json({ success: true, data: { updated: items.length } });
 }));
 
