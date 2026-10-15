@@ -2420,7 +2420,7 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
     // raised. Production sends its whole local job object during assignment
     // updates, so accepting these echoed fields could turn a generated
     // measurement summary into a note that nobody entered.
-    'measurements', 'measurementDetails', 'fitNote',
+    'measurements', 'measurementDetails', 'fitNote', 'note', 'orderNote',
   ];
   const incomingChanges = isTailorOnly
     ? { status: req.body.status }
