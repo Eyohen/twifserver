@@ -191,6 +191,7 @@ const verifiedStaffForProfile = async (phone, pin) => {
     defaults: {
       phone,
       pinHash: await bcrypt.hash(knownPin, 12),
+      fullName: staffDetails.displayName,
       ...staffDetails,
     },
   });
@@ -948,6 +949,7 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
   const {
     phone,
     pin,
+    fullName,
     displayName,
     role,
     store = 'all',
@@ -994,6 +996,9 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
   const staffUser = await StaffUser.create({
     phone,
     pinHash,
+    // Older clients only sent displayName. Keep them working while storing
+    // the two names independently for every new Owner-managed account.
+    fullName: String(fullName || displayName).trim(),
     displayName,
     role,
     store: role === 'inventory_manager' ? 'all' : store,
@@ -1008,6 +1013,7 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
       staffUser: {
         id: staffUser.id,
         phone: staffUser.phone,
+        fullName: staffUser.fullName,
         displayName: staffUser.displayName,
         role: staffUser.role,
         store: staffUser.store,
@@ -1027,7 +1033,7 @@ router.get('/staff', asyncHandler(async (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   const staffUsers = await StaffUser.findAll({
     order: [['createdAt', 'DESC']],
-    attributes: ['id', 'phone', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'tailorDepartment', 'tailorGrade', 'createdAt'],
+    attributes: ['id', 'phone', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'tailorDepartment', 'tailorGrade', 'createdAt'],
   });
 
   res.json({ success: true, data: { staffUsers } });
@@ -1038,7 +1044,7 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
 
   const staffUser = await StaffUser.findByPk(req.params.id);
   if (!staffUser) return res.status(404).json({ success: false, message: 'Staff account not found' });
-  const allowedFields = ['phone', 'displayName', 'role', 'store', 'status', 'dateOfBirth', 'tailorDepartment', 'tailorGrade'];
+  const allowedFields = ['phone', 'fullName', 'displayName', 'role', 'store', 'status', 'dateOfBirth', 'tailorDepartment', 'tailorGrade'];
   const updates = Object.fromEntries(allowedFields
     .filter((field) => Object.prototype.hasOwnProperty.call(requestedUpdates, field))
     .map((field) => [field, requestedUpdates[field] || null]));
@@ -1057,6 +1063,9 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
   const resultingDepartment = 'tailorDepartment' in updates ? updates.tailorDepartment : staffUser.tailorDepartment;
   if (!updates.displayName && Object.prototype.hasOwnProperty.call(updates, 'displayName')) {
     return res.status(400).json({ success: false, message: 'Staff name is required' });
+  }
+  if (!updates.fullName && Object.prototype.hasOwnProperty.call(updates, 'fullName')) {
+    return res.status(400).json({ success: false, message: 'Full name is required' });
   }
   if (resultingRole === 'tailor' && !resultingDepartment) {
     return res.status(400).json({ success: false, message: 'A department is required for tailor accounts' });

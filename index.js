@@ -218,11 +218,38 @@ const ensureDynamicTailorDepartments = async () => {
   console.log('Schema repair: widened StaffUsers.tailorDepartment for owner-managed departments');
 };
 
+const ensureStaffFullNames = async () => {
+  const [tables] = await db.sequelize.query(`
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema() AND table_name = 'StaffUsers'
+  `);
+  if (!tables.length) return;
+
+  const [columns] = await db.sequelize.query(`
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'StaffUsers'
+      AND column_name = 'fullName'
+  `);
+  if (!columns.length) {
+    await db.sequelize.query('ALTER TABLE "StaffUsers" ADD COLUMN "fullName" VARCHAR(120);');
+  }
+  await db.sequelize.query(`
+    UPDATE "StaffUsers"
+    SET "fullName" = "displayName"
+    WHERE "fullName" IS NULL OR BTRIM("fullName") = '';
+  `);
+  await db.sequelize.query('ALTER TABLE "StaffUsers" ALTER COLUMN "fullName" SET NOT NULL;');
+};
+
 const startServer = async () => {
   try {
     await db.sequelize.authenticate();
     console.log('Database connection established successfully');
     await ensureDynamicTailorDepartments();
+    await ensureStaffFullNames();
 
     if (process.env.NODE_ENV === 'development') {
       await db.sequelize.sync({ alter: true });
@@ -272,6 +299,17 @@ const startServer = async () => {
       console.log(addedColumns.length
         ? `Schema check added missing columns: ${addedColumns.join(', ')}`
         : 'Schema check: no missing columns');
+
+      // Staff used to have only displayName, so existing rows need a safe
+      // initial full name when the independent column is introduced.
+      const staffTable = await queryInterface.describeTable('StaffUsers').catch(() => null);
+      if (staffTable?.fullName) {
+        await queryInterface.sequelize.query(`
+          UPDATE "StaffUsers"
+          SET "fullName" = "displayName"
+          WHERE "fullName" IS NULL OR BTRIM("fullName") = '';
+        `);
+      }
 
       // DROP NOT NULL only ever loosens a constraint — it can never lose or
       // corrupt an existing value, unlike the rename/retype/drop cases the
