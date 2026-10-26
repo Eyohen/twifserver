@@ -1021,6 +1021,10 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
 }));
 
 router.get('/staff', asyncHandler(async (req, res) => {
+  // Account status is access-control state, not static directory data. A
+  // browser/CDN-cached response can make a successful activation appear to
+  // revert after refresh, so every visit must read the current database row.
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   const staffUsers = await StaffUser.findAll({
     order: [['createdAt', 'DESC']],
     attributes: ['id', 'phone', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'tailorDepartment', 'tailorGrade', 'createdAt'],
@@ -1084,6 +1088,9 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
   }
 
   await staffUser.update(updates);
+  // Return the value committed by Postgres rather than the in-memory model.
+  // The Owner screen uses this as its first confirmation of the saved state.
+  await staffUser.reload();
   res.json({ success: true, data: { staffUser } });
 }));
 
