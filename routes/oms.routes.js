@@ -88,6 +88,17 @@ const profileImageUpload = multer({
   },
 });
 
+// A style reference clip, not a feature film — kept well under Cloudinary's
+// video limits and Railway's request memory, since the whole file is held
+// in memory as multipart form data before it goes to Cloudinary.
+const styleVideoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter: (req, file, callback) => {
+    callback(file.mimetype.startsWith('video/') ? null : new Error('Only video files are allowed'), file.mimetype.startsWith('video/'));
+  },
+});
+
 // Everything in the OMS is staff-only, with three deliberate exceptions:
 // signing in, the customer's own tracking link and profile, and the inventory
 // item photographs, which are loaded straight into an <img> and so cannot carry
@@ -1122,6 +1133,26 @@ router.post('/staff/:phone/profile-image', profileImageUpload.single('image'), a
     success: true,
     data: {
       profileImageUrl: staffUser.profileImageUrl,
+    },
+  });
+}));
+
+// A style reference clip for an order-sheet item — too big to embed as a
+// data URI in the order sheet's own JSON the way images are, so it goes to
+// Cloudinary and the item keeps only the resulting URL.
+router.post('/order-sheets/style-video', styleVideoUpload.single('video'), asyncHandler(async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ success: false, message: 'Select a video to upload' });
+  }
+  const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+  const uploaded = await cloudinaryService.uploadVideo(dataUri, { folder: 'twif/order-sheet-videos' });
+  res.json({
+    success: true,
+    data: {
+      url: uploaded.secure_url,
+      publicId: uploaded.public_id,
+      format: uploaded.format,
+      duration: uploaded.duration,
     },
   });
 }));
@@ -2445,8 +2476,33 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
     // measurement summary into a note that nobody entered.
     'measurements', 'measurementDetails', 'fitNote', 'note', 'orderNote',
   ];
+  // A tailor only finishes their own department's work on the item(s) they
+  // were assigned — the order as a whole isn't ready for the customer until
+  // every assigned department is, even once this one is. On a sheet with
+  // real per-item departments, marking Ready records just this tailor's
+  // department as done and only promotes the whole sheet to Ready once
+  // nothing else is outstanding. A legacy sheet with no real items array has
+  // nothing to scope this to, so it keeps the old whole-sheet behaviour.
+  let departmentReadyItems = null;
+  if (isTailorOnly && req.body.status === 'Ready'
+      && Array.isArray(previousOrderSheet.items) && previousOrderSheet.items.length) {
+    const myDepartment = req.staff.tailorDepartment;
+    departmentReadyItems = previousOrderSheet.items.map((item) => {
+      const owns = Array.isArray(item.departments) && item.departments.includes(myDepartment)
+        && Array.isArray(item.tailors) && item.tailors.includes(req.staff.displayName);
+      if (!owns) return item;
+      return { ...item, departmentReady: { ...(item.departmentReady || {}), [myDepartment]: true } };
+    });
+  }
+  const allDepartmentsReady = (items) => items.every((item) => (
+    !Array.isArray(item.departments) || !item.departments.length
+      || item.departments.every((department) => item.departmentReady?.[department])
+  ));
+
   const incomingChanges = isTailorOnly
-    ? { status: req.body.status }
+    ? (departmentReadyItems
+      ? { items: departmentReadyItems, status: allDepartmentsReady(departmentReadyItems) ? 'Ready' : previousOrderSheet.status }
+      : { status: req.body.status })
     : (isPrivilegedEditor
       ? req.body
       : Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => !INVOICE_OWNED_FIELDS.includes(key))));
@@ -2542,6 +2598,21 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       `${invoice.invoiceNumber} for ${invoice.customerName} was marked ready.`,
       { invoiceNumber: invoice.invoiceNumber, event: 'order_ready' }
     );
+  } else if (departmentReadyItems) {
+    // The order as a whole isn't ready yet — only this tailor's department
+    // is — so whoever's tracking the job hears exactly that, not something
+    // implying the customer's whole order just became ready.
+    const myDepartment = req.staff.tailorDepartment;
+    const finishedItems = departmentReadyItems
+      .filter((item, index) => item.departmentReady?.[myDepartment] && previousOrderSheet.items[index]?.departmentReady?.[myDepartment] !== true)
+      .map((item) => item.item || 'an item');
+    if (finishedItems.length) {
+      await notifyRoles(
+        ['store_manager', 'production_manager', 'owner', 'admin'],
+        `${req.staff.displayName} finished the ${myDepartment} work on ${finishedItems.join(', ')} for ${invoice.invoiceNumber} — other departments are still outstanding.`,
+        { invoiceNumber: invoice.invoiceNumber, event: 'department_ready', department: myDepartment }
+      );
+    }
   }
 
   res.json({
@@ -2742,12 +2813,6 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
   if (!invoice) return res.status(404).json({ success: false, message: 'Order not found' });
 
   const sheet = orderSheetOf(invoice);
-  if (PRODUCTION_ASSIGNMENT_LOCKED_STATUSES.has(sheet.status)) {
-    return res.status(409).json({
-      success: false,
-      message: 'Tailor assignments are locked once production is in progress',
-    });
-  }
   const previouslyAssigned = new Set([
     ...(Array.isArray(sheet.items) ? sheet.items.flatMap((item) => item.tailors || []) : []),
     ...(Array.isArray(sheet.tailors) ? sheet.tailors : []),
@@ -2777,6 +2842,25 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
     fabricUsage: sheet.fabricUsage || '',
   }];
   const requested = Array.isArray(req.body?.items) ? req.body.items : [];
+
+  // Who does the work can still change after production has started — the
+  // work just moves to someone else. What's already on order for it cannot:
+  // only a request that leaves every item's fabric exactly as it was is
+  // allowed through once locked.
+  if (PRODUCTION_ASSIGNMENT_LOCKED_STATUSES.has(sheet.status)) {
+    const triesToChangeFabric = requested.some((entry) => {
+      if (!Array.isArray(entry.fabrics)) return false;
+      const index = Number(entry.index);
+      const currentFabrics = Array.isArray(items[index]?.fabrics) ? items[index].fabrics : [];
+      return JSON.stringify(entry.fabrics) !== JSON.stringify(currentFabrics);
+    });
+    if (triesToChangeFabric) {
+      return res.status(409).json({
+        success: false,
+        message: 'Fabric is locked once production is in progress',
+      });
+    }
+  }
 
   for (const entry of requested) {
     const index = Number(entry.index);
