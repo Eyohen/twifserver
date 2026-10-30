@@ -245,11 +245,10 @@ router.post('/auth/login', asyncHandler(async (req, res) => {
   });
 }));
 
-// Two-factor sign-in. Required of the Admin role, which is the account that can
-// reach every part of the shop's records — a phone number and a short PIN is
-// not enough on its own. Everyone else signs in with phone and PIN.
-const TWO_FACTOR_ROLES = ['admin'];
-const requiresTwoFactor = (staff) => TWO_FACTOR_ROLES.includes(staff?.role);
+// Two-factor sign-in is mandatory for Admin and optional for Owner. Once an
+// Owner enables it from Settings, every later login requires the app code too.
+const requiresTwoFactor = (staff) => staff?.role === 'admin'
+  || (staff?.role === 'owner' && Boolean(staff.twoFactorEnabledAt));
 
 // A short-lived ticket that says "this person's PIN was right, now prove the
 // second factor". It is not a session: it cannot be used against the API.
@@ -332,6 +331,35 @@ router.post('/auth/2fa/setup', asyncHandler(async (req, res) => {
   // Held against the account unconfirmed: enabledAt is what makes it live.
   await staff.update({ twoFactorSecret: secret });
   res.json({ success: true, data: { qr, secret, uri } });
+}));
+
+// Owner 2FA is optional and is enrolled deliberately from Settings while the
+// Owner is already signed in. These routes are not public like the login-time
+// Admin setup routes above, so a ticket or guessed staff id cannot enable it.
+router.post('/auth/2fa/settings/setup', requireRole('owner'), asyncHandler(async (req, res) => {
+  const staff = req.staff;
+  if (staff.twoFactorEnabledAt) {
+    return res.status(409).json({ success: false, message: 'Two-factor sign-in is already on for this account' });
+  }
+  const secret = otp.generateSecret();
+  const uri = otp.generateURI({ secret, label: staff.displayName, issuer: 'twif OMS' });
+  const qr = await QRCode.toDataURL(uri, { margin: 1, width: 240 });
+  await staff.update({ twoFactorSecret: secret });
+  res.json({ success: true, data: { qr, secret, uri } });
+}));
+
+router.post('/auth/2fa/settings/confirm', requireRole('owner'), asyncHandler(async (req, res) => {
+  const staff = req.staff;
+  if (!staff.twoFactorSecret) {
+    return res.status(409).json({ success: false, message: 'Start setting up two-factor sign-in first' });
+  }
+  if (!isAppCode(staff.twoFactorSecret, req.body?.code)) {
+    return res.status(400).json({ success: false, message: 'That code does not match. Check Google Authenticator and try again.' });
+  }
+  const { plain, hashed } = await makeRecoveryCodes();
+  await staff.update({ twoFactorEnabledAt: new Date(), twoFactorRecoveryCodes: hashed });
+  await notifyRoles(['owner'], `${staff.displayName} turned on two-factor sign-in.`, { event: 'two_factor_enabled' });
+  res.json({ success: true, data: { recoveryCodes: plain } });
 }));
 
 router.post('/auth/2fa/confirm', asyncHandler(async (req, res) => {
@@ -446,6 +474,8 @@ router.get('/auth/me', asyncHandler(async (req, res) => {
       staff: {
         id: staff.id,
         phone: staff.phone,
+        email: staff.email,
+        fullName: staff.fullName,
         displayName: staff.displayName,
         role: staff.role,
         store: staff.store,
