@@ -189,7 +189,6 @@ router.post('/auth/login', asyncHandler(async (req, res) => {
   const recordAttempt = (outcome, staffUser) => StaffLoginEvent.create({
     staffUserId: staffUser?.id || null,
     phone,
-    email,
     outcome,
     ipAddress: req.ip || null,
     userAgent: String(req.get('user-agent') || '').slice(0, 400) || null,
@@ -920,6 +919,7 @@ router.patch('/departments/:id', requireRole('owner', 'admin'), asyncHandler(asy
 router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
   const {
     phone,
+    email,
     pin,
     fullName,
     displayName,
