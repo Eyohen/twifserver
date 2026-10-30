@@ -189,6 +189,7 @@ router.post('/auth/login', asyncHandler(async (req, res) => {
   const recordAttempt = (outcome, staffUser) => StaffLoginEvent.create({
     staffUserId: staffUser?.id || null,
     phone,
+    email,
     outcome,
     ipAddress: req.ip || null,
     userAgent: String(req.get('user-agent') || '').slice(0, 400) || null,
@@ -937,6 +938,13 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
   }
   const invalidPhone = phoneProblem(phone);
   if (invalidPhone) return res.status(400).json({ success: false, message: invalidPhone });
+  const normalizedEmail = String(email || '').trim().toLowerCase() || null;
+  if (normalizedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    return res.status(400).json({ success: false, message: 'Enter a valid email address' });
+  }
+  if (normalizedEmail && await StaffUser.findOne({ where: { email: normalizedEmail } })) {
+    return res.status(409).json({ success: false, message: 'That email address is already assigned to a staff account' });
+  }
   const birthDate = dateOrNull(dateOfBirth);
 
   const problem = staffFieldProblem({ role, store, status: req.body.status });
@@ -954,7 +962,7 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
   // rejections, everything. A second one is almost always a mistake made
   // while setting up a new account, not an intentional change of ownership.
   if (role === 'owner') {
-    const existingOwner = await StaffUser.findOne({ where: { role: 'owner', status: 'active' } });
+    const existingOwner = await StaffUser.findOne({ where: { role: 'owner' } });
     if (existingOwner) {
       return res.status(409).json({
         success: false,
@@ -966,6 +974,7 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
   const pinHash = await bcrypt.hash(pin, 12);
   const staffUser = await StaffUser.create({
     phone,
+    email: normalizedEmail,
     pinHash,
     // Older clients only sent displayName. Keep them working while storing
     // the two names independently for every new Owner-managed account.
@@ -984,6 +993,7 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
       staffUser: {
         id: staffUser.id,
         phone: staffUser.phone,
+        email: staffUser.email,
         fullName: staffUser.fullName,
         displayName: staffUser.displayName,
         role: staffUser.role,
@@ -1004,7 +1014,7 @@ router.get('/staff', asyncHandler(async (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   const staffUsers = await StaffUser.findAll({
     order: [['createdAt', 'DESC']],
-    attributes: ['id', 'phone', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'tailorDepartment', 'tailorGrade', 'createdAt'],
+    attributes: ['id', 'phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'tailorDepartment', 'tailorGrade', 'createdAt'],
   });
 
   res.json({ success: true, data: { staffUsers } });
@@ -1015,7 +1025,7 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
 
   const staffUser = await StaffUser.findByPk(req.params.id);
   if (!staffUser) return res.status(404).json({ success: false, message: 'Staff account not found' });
-  const allowedFields = ['phone', 'fullName', 'displayName', 'role', 'store', 'status', 'dateOfBirth', 'tailorDepartment', 'tailorGrade'];
+  const allowedFields = ['phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'dateOfBirth', 'tailorDepartment', 'tailorGrade'];
   const updates = Object.fromEntries(allowedFields
     .filter((field) => Object.prototype.hasOwnProperty.call(requestedUpdates, field))
     .map((field) => [field, requestedUpdates[field] || null]));
@@ -1023,6 +1033,15 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
   if ('phone' in updates) {
     const invalidPhone = phoneProblem(updates.phone);
     if (invalidPhone) return res.status(400).json({ success: false, message: invalidPhone });
+  }
+  if ('email' in updates) {
+    updates.email = String(updates.email || '').trim().toLowerCase() || null;
+    if (updates.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(updates.email)) {
+      return res.status(400).json({ success: false, message: 'Enter a valid email address' });
+    }
+    if (updates.email && await StaffUser.findOne({ where: { email: updates.email, id: { [Op.ne]: staffUser.id } } })) {
+      return res.status(409).json({ success: false, message: 'That email address is already assigned to a staff account' });
+    }
   }
 
   // Editing a staff member hits the same columns, so it is checked the same way.
@@ -1045,7 +1064,7 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
     return res.status(400).json({ success: false, message: 'Choose an active department for this tailor account' });
   }
   if (resultingRole === 'owner' && staffUser.role !== 'owner') {
-    const existingOwner = await StaffUser.findOne({ where: { role: 'owner', status: 'active', id: { [Op.ne]: staffUser.id } } });
+    const existingOwner = await StaffUser.findOne({ where: { role: 'owner', id: { [Op.ne]: staffUser.id } } });
     if (existingOwner) {
       return res.status(409).json({
         success: false,
