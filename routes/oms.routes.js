@@ -120,20 +120,6 @@ router.use((req, res, next) => {
   return requireStaff(req, res, next);
 });
 
-const knownStaffAccounts = {
-  '08000000001': { pin: 'owner26', displayName: 'Jenni', role: 'owner', store: 'all' },
-  '08000000002': { pin: 'admin26', displayName: 'Jim', role: 'admin', store: 'all' },
-  // 'all' here would make the store-manager scoping filter a permanent no-op
-  // for the one demo account every QA pass actually signs in as — a real
-  // store is needed so that scoping is ever observable through the standard
-  // demo flow.
-  '08000000003': { pin: 'store26', displayName: 'Bola', role: 'store_manager', store: 'lekki' },
-  '08000000004': { pin: 'accounts26', displayName: 'Funke', role: 'accounts', store: 'all' },
-  '08000000005': { pin: 'production26', displayName: 'Tunde', role: 'production_manager', store: 'production' },
-  '08000000006': { pin: 'inventory26', displayName: 'Kemi', role: 'inventory_manager', store: 'all' },
-  '08000000007': { pin: 'tailor26', displayName: 'Segun', role: 'tailor', store: 'production', tailorDepartment: 'suit', tailorGrade: 4 },
-};
-
 // The values these columns actually accept. Sending anything else reached
 // Postgres and came back as "invalid input value for enum
 // enum_StaffUsers_store", which is not a sentence anybody should be shown.
@@ -178,24 +164,9 @@ const staffFieldProblem = ({ role, store, status }) => {
 const naira = (amount) => Number(amount || 0).toLocaleString('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 });
 
 const verifiedStaffForProfile = async (phone, pin) => {
-  let staffUser = await StaffUser.findOne({ where: { phone } });
-  if (staffUser) {
-    return pin && await bcrypt.compare(pin, staffUser.pinHash) ? staffUser : null;
-  }
-
-  const knownAccount = knownStaffAccounts[phone];
-  if (!knownAccount || pin !== knownAccount.pin) return null;
-  const { pin: knownPin, ...staffDetails } = knownAccount;
-  const [createdStaff] = await StaffUser.findOrCreate({
-    where: { phone },
-    defaults: {
-      phone,
-      pinHash: await bcrypt.hash(knownPin, 12),
-      fullName: staffDetails.displayName,
-      ...staffDetails,
-    },
-  });
-  return createdStaff;
+  const staffUser = await StaffUser.findOne({ where: { phone } });
+  if (!staffUser) return null;
+  return pin && await bcrypt.compare(pin, staffUser.pinHash) ? staffUser : null;
 };
 
 // Signing in. The PIN was checked in the browser against a list compiled into
@@ -1586,39 +1557,7 @@ router.post('/invoices', asyncHandler(async (req, res) => {
 }));
 
 router.post('/invoices/html-preview', (req, res) => {
-  const payload = buildInvoiceHtmlPayload({
-    ...req.body,
-    invoiceNumber: req.body.invoiceNumber || 'INV22013',
-    invoiceDate: req.body.invoiceDate || '2026-04-16',
-    dueDate: req.body.dueDate || '2026-04-16',
-    customer: req.body.customer || { name: 'Mr Akpan', phone: '+1 (850) 450-7944' },
-    items: req.body.items || [
-      {
-        description: 'Black Double Breasted Three Piece Suit',
-        rate: 400000,
-        quantity: 1,
-        amount: 400000,
-      },
-      {
-        description: 'Light Brown Double Breasted Three Piece Suit',
-        rate: 400000,
-        quantity: 1,
-        amount: 400000,
-      },
-      {
-        description: 'Lapel Pin',
-        note: 'Complimentary with order.',
-        rate: 20000,
-        quantity: 2,
-        discountPercent: 100,
-        amount: 0,
-      },
-    ],
-    subtotal: req.body.subtotal ?? 800000,
-    eliteDiscountAmount: req.body.eliteDiscountAmount ?? 40000,
-    balanceDue: req.body.balanceDue ?? 760000,
-    trackingUrl: req.body.trackingUrl || 'https://track.twiflagos.com/c/a8f3d2e19b',
-  });
+  const payload = buildInvoiceHtmlPayload(req.body);
 
   const html = createTwifInvoiceHtml(payload);
   res.type('html').send(html);

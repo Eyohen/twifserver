@@ -2,60 +2,21 @@
 
 const db = require('../models');
 
-// The two stores the shop opened with. A blank Stores table — first boot, or
-// a database from before this table existed — gets them back automatically,
-// the same way index.js repairs a missing table: nobody should have to run a
-// script to see the stores that already exist.
-const DEFAULT_STORES = [
-  {
-    key: 'lekki',
-    name: 'Lekki Store',
-    location: 'Lekki Phase One, Lagos',
-    addressLines: [
-      process.env.TWIF_LEKKI_ADDRESS_LINE_1 || 'Casa Kaysora Mall, Lekki Phase One, Lagos',
-      process.env.TWIF_LEKKI_ADDRESS_LINE_2 || 'Pavilion Heights, Issac John Street, Ikeja GRA',
-      process.env.TWIF_LEKKI_ADDRESS_LINE_3 || 'Opposite Radisson Hotel',
-    ],
-    phone: process.env.TWIF_LEKKI_PHONE || '+234 705 533 7410',
-    email: process.env.TWIF_LEKKI_EMAIL || 'twifclothing@gmail.com',
-  },
-  {
-    key: 'ikeja',
-    name: 'Ikeja Store',
-    location: 'Ikeja GRA, Lagos',
-    addressLines: [
-      process.env.TWIF_IKEJA_ADDRESS_LINE_1 || 'Pavilion Heights, Issac John Street, Ikeja GRA',
-      process.env.TWIF_IKEJA_ADDRESS_LINE_2 || 'Ikeja, Lagos',
-    ],
-    phone: process.env.TWIF_IKEJA_PHONE || '+234 705 533 7410',
-    email: process.env.TWIF_IKEJA_EMAIL || 'twifclothing@gmail.com',
-  },
-];
-
-const FALLBACK_KEY = 'lekki';
-
 // Populated at server startup and refreshed by the store CRUD routes after
 // every create/update/delete, so the two stay in step without every read
 // having to hit the database.
-let cache = new Map(DEFAULT_STORES.map((store) => [store.key, { ...store, status: 'active' }]));
-
-const ensureSeeded = async () => {
-  const existing = await db.Store.count();
-  if (existing > 0) return;
-  await db.Store.bulkCreate(DEFAULT_STORES.map((store) => ({ ...store, status: 'active' })));
-};
+let cache = new Map();
 
 const refreshStoreCache = async () => {
-  await ensureSeeded();
   const stores = await db.Store.findAll({ order: [['createdAt', 'ASC']] });
   cache = new Map(stores.map((store) => [store.key, store.get({ plain: true })]));
   return cache;
 };
 
 const normalizeStoreKey = (store) => {
-  const key = String(store || FALLBACK_KEY).trim().toLowerCase();
+  const key = String(store || '').trim().toLowerCase();
   if (cache.has(key)) return key;
-  return cache.has(FALLBACK_KEY) ? FALLBACK_KEY : key;
+  return key;
 };
 
 // Synchronous by design: invoice PDFs and plain-text summaries are built from

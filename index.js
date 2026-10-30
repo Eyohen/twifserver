@@ -335,9 +335,7 @@ const startServer = async () => {
       }
     }
 
-    // Loads the Stores table into memory, seeding it with Lekki and Ikeja on
-    // a first boot or a database from before this table existed — the same
-    // self-healing the schema check above does for tables and columns.
+    // Load owner-managed stores and departments into the runtime caches.
     await refreshStoreCache();
     await refreshDepartmentCache();
 
