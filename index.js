@@ -41,6 +41,10 @@ const allowedOrigins = new Set([
   'http://localhost:4173',
   'https://twif.ng',
   'https://www.twif.ng',
+  'https://thewayitfits.com',
+  'https://www.thewayitfits.com',
+  'https://twif-app-alpha.vercel.app',
+  'https://twif-app-twif.vercel.app',
   'https://twifinvoiceredesign2.netlify.app',
   ...configuredOrigins,
 ]);
