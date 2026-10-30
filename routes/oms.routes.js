@@ -1029,6 +1029,17 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
   const updates = Object.fromEntries(allowedFields
     .filter((field) => Object.prototype.hasOwnProperty.call(requestedUpdates, field))
     .map((field) => [field, requestedUpdates[field] || null]));
+  if (staffUser.role === 'owner') {
+    if ('status' in updates && updates.status !== staffUser.status) {
+      return res.status(403).json({ success: false, message: 'The Owner account cannot be deactivated' });
+    }
+    if ('role' in updates && updates.role !== 'owner') {
+      return res.status(403).json({ success: false, message: 'The Owner role cannot be changed' });
+    }
+    if ('store' in updates && updates.store !== staffUser.store) {
+      return res.status(403).json({ success: false, message: 'The Owner store assignment cannot be changed' });
+    }
+  }
   if ('dateOfBirth' in updates) updates.dateOfBirth = dateOrNull(updates.dateOfBirth);
   if ('phone' in updates) {
     const invalidPhone = phoneProblem(updates.phone);
@@ -1112,8 +1123,8 @@ router.get('/staff/:id/logins', requireRole('owner', 'admin'), asyncHandler(asyn
 router.delete('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) => {
   const staffUser = await StaffUser.findByPk(req.params.id);
   if (!staffUser) return res.status(404).json({ success: false, message: 'Staff account not found' });
-  if (staffUser.id === req.staff.id) {
-    return res.status(400).json({ success: false, message: 'The Owner cannot delete their own account' });
+  if (staffUser.role === 'owner') {
+    return res.status(403).json({ success: false, message: 'The Owner account cannot be deleted' });
   }
   await staffUser.destroy();
   res.json({ success: true, message: 'Staff account deleted' });
