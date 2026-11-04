@@ -33,6 +33,13 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.DATE,
       allowNull: true,
     },
+    // Owner-controlled policy. For an Admin this decides whether the next
+    // sign-in must enrol/use an authenticator; enrolment state stays separate.
+    twoFactorRequired: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
     // Hashed like a password, because a recovery code signs somebody in.
     twoFactorRecoveryCodes: {
       type: DataTypes.JSONB,

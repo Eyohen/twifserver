@@ -71,6 +71,10 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       defaultValue: 0,
     },
+    archivedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
   }, {
     tableName: 'Fabrics',
     timestamps: true,

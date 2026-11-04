@@ -129,10 +129,12 @@ const STAFF_ROLES = ['owner', 'admin', 'store_manager', 'accounts', 'production_
 // rather than living inside it.
 const staffStores = () => [...storeKeys(), 'all', 'production'];
 const STAFF_STATUSES = ['active', 'inactive', 'deactivated'];
-const PHONE_PATTERN = /^\d{11}$/;
+// Existing Nigerian accounts use the familiar 11-digit local form. Customers
+// and staff abroad use E.164: a leading `+`, country code and up to 15 digits.
+const PHONE_PATTERN = /^(?:0\d{10}|\+[1-9]\d{6,14})$/;
 const phoneProblem = (value) => PHONE_PATTERN.test(String(value || '').trim())
   ? null
-  : 'Phone number must contain exactly 11 digits.';
+  : 'Enter an 11-digit Nigerian number or an international number beginning with + and its country code.';
 
 // A date field left blank arrives as an empty string, which Sequelize turns
 // into the literal "Invalid date" and Postgres rejects — a 500 with a database
@@ -238,6 +240,7 @@ router.post('/auth/login', asyncHandler(async (req, res) => {
         // So the account screen can say whether two-factor is on and how many
         // recovery codes are left, without ever handing back the secret.
         twoFactorRequired: requiresTwoFactor(staff),
+        twoFactorPolicyRequired: Boolean(staff.twoFactorRequired),
         twoFactorEnabled: Boolean(staff.twoFactorEnabledAt),
         recoveryCodesLeft: (staff.twoFactorRecoveryCodes || []).length,
       },
@@ -245,10 +248,10 @@ router.post('/auth/login', asyncHandler(async (req, res) => {
   });
 }));
 
-// Two-factor sign-in is mandatory for Admin and optional for Owner. Once an
-// Owner enables it from Settings, every later login requires the app code too.
-const requiresTwoFactor = (staff) => staff?.role === 'admin'
-  || (staff?.role === 'owner' && Boolean(staff.twoFactorEnabledAt));
+// Two-factor is optional for both privileged accounts. Owners control whether
+// an Admin must use it; an Owner enables their own from Settings.
+const requiresTwoFactor = (staff) => Boolean(staff?.twoFactorEnabledAt)
+  || (staff?.role === 'admin' && Boolean(staff.twoFactorRequired));
 
 // A short-lived ticket that says "this person's PIN was right, now prove the
 // second factor". It is not a session: it cannot be used against the API.
@@ -320,6 +323,9 @@ const staffForEnrolment = async (req) => {
 router.post('/auth/2fa/setup', asyncHandler(async (req, res) => {
   const staff = await staffForEnrolment(req);
   if (!staff) return res.status(401).json({ success: false, message: 'Sign in first' });
+  if (staff.role === 'admin' && !staff.twoFactorRequired) {
+    return res.status(403).json({ success: false, message: 'Only the Owner can turn on two-factor sign-in for an Admin account' });
+  }
   if (staff.twoFactorEnabledAt) {
     return res.status(409).json({ success: false, message: 'Two-factor sign-in is already on for this account' });
   }
@@ -405,6 +411,9 @@ router.post('/auth/2fa/disable', asyncHandler(async (req, res) => {
 
   const staff = isSelf ? req.staff : await StaffUser.findByPk(targetId);
   if (!staff) return res.status(404).json({ success: false, message: 'Staff account not found' });
+  if (isSelf && staff.role === 'admin') {
+    return res.status(403).json({ success: false, message: 'Only the Owner can turn off two-factor sign-in for an Admin account' });
+  }
 
   if (isSelf) {
     const code = String(req.body?.code || '').trim();
@@ -413,7 +422,12 @@ router.post('/auth/2fa/disable', asyncHandler(async (req, res) => {
     }
   }
 
-  await staff.update({ twoFactorSecret: null, twoFactorEnabledAt: null, twoFactorRecoveryCodes: [] });
+  await staff.update({
+    twoFactorSecret: null,
+    twoFactorEnabledAt: null,
+    twoFactorRecoveryCodes: [],
+    ...(staff.role === 'admin' ? { twoFactorRequired: false } : {}),
+  });
   res.json({ success: true, message: 'Two-factor sign-in is off' });
 }));
 
@@ -485,6 +499,7 @@ router.get('/auth/me', asyncHandler(async (req, res) => {
         // So the account screen can say whether two-factor is on and how many
         // recovery codes are left, without ever handing back the secret.
         twoFactorRequired: requiresTwoFactor(staff),
+        twoFactorPolicyRequired: Boolean(staff.twoFactorRequired),
         twoFactorEnabled: Boolean(staff.twoFactorEnabledAt),
         recoveryCodesLeft: (staff.twoFactorRecoveryCodes || []).length,
       },
@@ -946,7 +961,7 @@ router.patch('/departments/:id', requireRole('owner', 'admin'), asyncHandler(asy
   res.json({ success: true, data: { department } });
 }));
 
-router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
+router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
   const {
     phone,
     email,
@@ -979,6 +994,9 @@ router.post('/staff', requireRole('owner'), asyncHandler(async (req, res) => {
 
   const problem = staffFieldProblem({ role, store, status: req.body.status });
   if (problem) return res.status(400).json({ success: false, message: problem });
+  if (req.staff.role === 'admin' && role === 'owner') {
+    return res.status(403).json({ success: false, message: 'Admin cannot create or change the Owner account' });
+  }
 
   if (role === 'tailor' && !tailorDepartment) {
     return res.status(400).json({ success: false, message: 'A department is required for tailor accounts' });
@@ -1044,17 +1062,20 @@ router.get('/staff', asyncHandler(async (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   const staffUsers = await StaffUser.findAll({
     order: [['createdAt', 'DESC']],
-    attributes: ['id', 'phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'tailorDepartment', 'tailorGrade', 'createdAt'],
+    attributes: ['id', 'phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'tailorDepartment', 'tailorGrade', 'twoFactorEnabledAt', 'twoFactorRequired', 'createdAt'],
   });
 
   res.json({ success: true, data: { staffUsers } });
 }));
 
-router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) => {
+router.patch('/staff/:id', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
   const { pin, ...requestedUpdates } = req.body;
 
   const staffUser = await StaffUser.findByPk(req.params.id);
   if (!staffUser) return res.status(404).json({ success: false, message: 'Staff account not found' });
+  if (req.staff.role === 'admin' && (staffUser.role === 'owner' || requestedUpdates.role === 'owner')) {
+    return res.status(403).json({ success: false, message: 'Admin cannot edit or assign the Owner account' });
+  }
   const allowedFields = ['phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'dateOfBirth', 'tailorDepartment', 'tailorGrade'];
   const updates = Object.fromEntries(allowedFields
     .filter((field) => Object.prototype.hasOwnProperty.call(requestedUpdates, field))
@@ -1132,6 +1153,26 @@ router.patch('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) =
   // The Owner screen uses this as its first confirmation of the saved state.
   await staffUser.reload();
   res.json({ success: true, data: { staffUser } });
+}));
+
+// Only the Owner decides whether an Admin account must use an authenticator.
+// Turning it on makes the Admin enrol at next sign-in; turning it off also
+// clears the old secret and recovery codes so no stale second factor remains.
+router.patch('/staff/:id/two-factor', requireRole('owner'), asyncHandler(async (req, res) => {
+  const staffUser = await StaffUser.findByPk(req.params.id);
+  if (!staffUser) return res.status(404).json({ success: false, message: 'Staff account not found' });
+  if (staffUser.role !== 'admin') {
+    return res.status(400).json({ success: false, message: 'This control applies only to Admin accounts' });
+  }
+  const enabled = req.body?.enabled === true;
+  await staffUser.update({
+    twoFactorRequired: enabled,
+    ...(!enabled ? { twoFactorSecret: null, twoFactorEnabledAt: null, twoFactorRecoveryCodes: [], forceLogoutAt: new Date() } : {}),
+  });
+  res.json({
+    success: true,
+    data: { staffUser: { ...staffUser.toJSON(), twoFactorEnabled: Boolean(staffUser.twoFactorEnabledAt) } },
+  });
 }));
 
 // Who has tried to sign in to this account, successfully or not. Restricted to
@@ -2410,7 +2451,10 @@ const mayEditInvoice = (staff, invoice) => {
   return Boolean(invoice.createdByStaffId) && invoice.createdByStaffId === staff?.id;
 };
 
-const PRODUCTION_ASSIGNMENT_LOCKED_STATUSES = new Set(['In Progress', 'Ready', 'Ready for Collection']);
+// Production may correct assignments and choose missing fabric while work is
+// under way. Ready/collection is the completed boundary; only then is the job
+// frozen. Fabric already deducted from inventory remains protected separately.
+const PRODUCTION_ASSIGNMENT_LOCKED_STATUSES = new Set(['Ready', 'Ready for Collection']);
 const productionAssignmentSnapshot = (orderSheet = {}) => ({
   tailor: orderSheet.tailor || '',
   tailors: Array.isArray(orderSheet.tailors) ? orderSheet.tailors : [],
@@ -2527,7 +2571,7 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       && productionAssignmentChanged(previousOrderSheet, proposedOrderSheet)) {
     return res.status(409).json({
       success: false,
-      message: 'Fabric and tailor assignments are locked once production is in progress',
+      message: 'Fabric and tailor assignments are locked once the order is completed',
     });
   }
 
@@ -2858,10 +2902,7 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
   }];
   const requested = Array.isArray(req.body?.items) ? req.body.items : [];
 
-  // Who does the work can still change after production has started — the
-  // work just moves to someone else. What's already on order for it cannot:
-  // only a request that leaves every item's fabric exactly as it was is
-  // allowed through once locked.
+  // Assignments and unallocated fabric may change until the job is completed.
   if (PRODUCTION_ASSIGNMENT_LOCKED_STATUSES.has(sheet.status)) {
     const triesToChangeFabric = requested.some((entry) => {
       if (!Array.isArray(entry.fabrics)) return false;
@@ -2872,7 +2913,7 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
     if (triesToChangeFabric) {
       return res.status(409).json({
         success: false,
-        message: 'Fabric is locked once production is in progress',
+        message: 'Fabric is locked once the order is completed',
       });
     }
   }
@@ -3136,7 +3177,7 @@ router.get('/inventory-types', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { types, units: INVENTORY_UNITS } });
 }));
 
-router.post('/inventory-types', asyncHandler(async (req, res) => {
+router.post('/inventory-types', requireRole('inventory_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const name = String(req.body?.name || '').trim();
   if (!name) return res.status(400).json({ success: false, message: 'A name is required' });
 
@@ -3150,7 +3191,7 @@ router.post('/inventory-types', asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, data: { types: next, units: INVENTORY_UNITS } });
 }));
 
-router.delete('/inventory-types/:name', asyncHandler(async (req, res) => {
+router.delete('/inventory-types/:name', requireRole('inventory_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const name = decodeURIComponent(req.params.name);
   const types = await readSetting(INVENTORY_TYPES_KEY, DEFAULT_INVENTORY_TYPES);
 
@@ -3171,7 +3212,7 @@ router.delete('/inventory-types/:name', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { types: next, units: INVENTORY_UNITS } });
 }));
 
-router.post('/fabrics', asyncHandler(async (req, res) => {
+router.post('/fabrics', requireRole('inventory_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const { sku, name, type, colour, quantity = 0, unit = 'units', cost, location, store, supplier, lowStockThreshold = 0, image } = req.body;
   const numericQuantity = Number(quantity);
   const numericThreshold = Number(lowStockThreshold);
@@ -3252,7 +3293,7 @@ const FABRIC_LIST_ATTRIBUTES = {
 };
 
 router.get('/fabrics', asyncHandler(async (req, res) => {
-  const fabrics = await Fabric.findAll({ attributes: FABRIC_LIST_ATTRIBUTES, order: [['name', 'ASC']] });
+  const fabrics = await Fabric.findAll({ where: { archivedAt: null }, attributes: FABRIC_LIST_ATTRIBUTES, order: [['name', 'ASC']] });
   res.json({ success: true, data: { fabrics } });
 }));
 
@@ -3324,7 +3365,7 @@ router.get('/fabrics/:id/image', asyncHandler(async (req, res) => {
   res.send(Buffer.from(match[2], 'base64'));
 }));
 
-router.post('/fabrics/:id/edit-requests', asyncHandler(async (req, res) => {
+router.post('/fabrics/:id/edit-requests', requireRole('inventory_manager'), asyncHandler(async (req, res) => {
   const fabric = await Fabric.findByPk(req.params.id);
   if (!fabric) return res.status(404).json({ success: false, message: 'Inventory item not found' });
   const { proposedChanges = {}, reason, requestedBy = 'Inventory Manager', requestedByRole = 'inventory_manager' } = req.body;
@@ -3392,7 +3433,7 @@ router.patch('/inventory-edit-requests/:id/review', requireRole('owner', 'admin'
 // A garment can take more than one fabric — a shell and a lining, or two
 // colours — so an order sheet carries a list, each with its own quantity. One
 // fabric still works: it arrives as a list of one.
-router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
+router.post('/fabrics/allocate', requireRole('production_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const { trackingToken: token, tailorName } = req.body;
   // Which garment this allocation is for. Undefined/null means the whole
   // job — the only option before fabric was tracked per item, and still how
@@ -3434,7 +3475,7 @@ router.post('/fabrics/allocate', asyncHandler(async (req, res) => {
     const payload = invoice.payload || {};
     const orderSheet = payload.orderSheet || {};
     if (PRODUCTION_ASSIGNMENT_LOCKED_STATUSES.has(orderSheet.status)) {
-      const error = new Error('Fabric allocation is locked once production is in progress');
+      const error = new Error('Fabric allocation is locked once the order is completed');
       error.status = 409;
       throw error;
     }
@@ -3604,16 +3645,52 @@ const notificationsForTailor = async (items, staff, { deduplicate = false } = {}
   });
 };
 
+// Store-manager notifications used to be role-wide: every manager received
+// every approval, payment, production update and comment from every store.
+// Resolve the referenced invoices in one query, then retain only work from the
+// manager's assigned store. An all-store manager is scoped to invoices they
+// personally raised, because there is no single store assignment to use.
+const notificationsForStoreManager = async (items, staff) => {
+  const invoiceNumbers = [...new Set(items
+    .map((item) => item.metadata?.invoiceNumber)
+    .filter(Boolean))];
+  const invoices = invoiceNumbers.length ? await SentInvoice.findAll({
+    where: { invoiceNumber: { [Op.in]: invoiceNumbers } },
+    attributes: ['invoiceNumber', 'store', 'createdByStaffId'],
+  }) : [];
+  const invoicesByNumber = new Map(invoices.map((invoice) => [invoice.invoiceNumber, invoice]));
+  const assignedStore = normalizeStoreKey(staff.store);
+
+  return items.filter((item) => {
+    const metadata = item.metadata || {};
+    if (metadata.storeManagerId) return String(metadata.storeManagerId) === String(staff.id);
+    const invoice = metadata.invoiceNumber ? invoicesByNumber.get(metadata.invoiceNumber) : null;
+    if (invoice) {
+      if (String(invoice.createdByStaffId || '') === String(staff.id)) return true;
+      return assignedStore !== 'all' && normalizeStoreKey(invoice.store) === assignedStore;
+    }
+    // A store-specific notification without an invoice may still be safely
+    // routed when its producer records the store explicitly. Role-wide system
+    // notices are deliberately excluded from a manager's operational inbox.
+    return Boolean(metadata.store) && assignedStore !== 'all'
+      && normalizeStoreKey(metadata.store) === assignedStore;
+  });
+};
+
 router.get('/notifications', asyncHandler(async (req, res) => {
   const role = req.staff?.role;
   if (!role) return res.status(400).json({ success: false, message: 'role is required' });
   let items = await OmsNotification.findAll({
     where: { recipientRole: role },
     order: [['createdAt', 'DESC']],
-    limit: 100,
+    // Filtering happens after invoice resolution. Fetch enough candidates so
+    // another busy store cannot push this manager's relevant rows out.
+    limit: role === 'store_manager' ? 500 : 100,
   });
   if (role === 'tailor') {
     items = await notificationsForTailor(items, req.staff, { deduplicate: true });
+  } else if (role === 'store_manager') {
+    items = (await notificationsForStoreManager(items, req.staff)).slice(0, 100);
   }
   res.json({
     success: true,
@@ -3631,6 +3708,8 @@ router.patch('/notifications/read-all', asyncHandler(async (req, res) => {
   let items = await OmsNotification.findAll({ where: { recipientRole: role, isRead: false } });
   if (role === 'tailor') {
     items = await notificationsForTailor(items, req.staff);
+  } else if (role === 'store_manager') {
+    items = await notificationsForStoreManager(items, req.staff);
   }
   if (items.length) {
     await OmsNotification.update(
@@ -3997,7 +4076,7 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
 // no way of being corrected at all.
 const EDITABLE_FABRIC_FIELDS = ['sku', 'name', 'type', 'colour', 'cost', 'location', 'supplier', 'lowStockThreshold', 'image'];
 
-router.patch('/fabrics/:id', asyncHandler(async (req, res) => {
+router.patch('/fabrics/:id', requireRole('inventory_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const body = req.body || {};
   if (body.quantity !== undefined) {
     return res.status(403).json({
@@ -4055,8 +4134,11 @@ router.patch('/fabrics/:id', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { fabric: updated } });
 }));
 
-router.delete('/fabrics/:id', asyncHandler(async (req, res) => {
-  res.status(403).json({ success: false, message: 'Inventory records cannot be deleted.' });
+router.delete('/fabrics/:id', requireRole('owner'), asyncHandler(async (req, res) => {
+  const fabric = await Fabric.findOne({ where: { id: req.params.id, archivedAt: null } });
+  if (!fabric) return res.status(404).json({ success: false, message: 'Inventory item not found or already archived.' });
+  await fabric.update({ archivedAt: new Date() });
+  res.json({ success: true, message: `${fabric.name} was archived.` });
 }));
 
 module.exports = router;
