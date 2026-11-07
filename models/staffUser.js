@@ -84,6 +84,11 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING(40),
       allowNull: true,
     },
+    tailorDepartments: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: [],
+    },
     tailorGrade: {
       type: DataTypes.INTEGER,
       allowNull: true,

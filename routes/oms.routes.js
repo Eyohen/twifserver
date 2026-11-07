@@ -135,6 +135,10 @@ const PHONE_PATTERN = /^(?:0\d{10}|\+[1-9]\d{6,14})$/;
 const phoneProblem = (value) => PHONE_PATTERN.test(String(value || '').trim())
   ? null
   : 'Enter an 11-digit Nigerian number or an international number beginning with + and its country code.';
+const tailorDepartmentsOf = (staff = {}) => [...new Set([
+  ...(Array.isArray(staff.tailorDepartments) ? staff.tailorDepartments : []),
+  staff.tailorDepartment,
+].map((value) => String(value || '').trim()).filter(Boolean))];
 
 // A date field left blank arrives as an empty string, which Sequelize turns
 // into the literal "Invalid date" and Postgres rejects — a 500 with a database
@@ -236,6 +240,7 @@ router.post('/auth/login', asyncHandler(async (req, res) => {
         store: staff.store,
         profileImageUrl: staff.profileImageUrl,
         tailorDepartment: staff.tailorDepartment,
+        tailorDepartments: tailorDepartmentsOf(staff),
         tailorGrade: staff.tailorGrade,
         // So the account screen can say whether two-factor is on and how many
         // recovery codes are left, without ever handing back the secret.
@@ -393,7 +398,7 @@ router.post('/auth/2fa/confirm', asyncHandler(async (req, res) => {
         staff: {
           id: staff.id, phone: staff.phone, displayName: staff.displayName, role: staff.role,
           store: staff.store, profileImageUrl: staff.profileImageUrl,
-          tailorDepartment: staff.tailorDepartment, tailorGrade: staff.tailorGrade,
+          tailorDepartment: staff.tailorDepartment, tailorDepartments: tailorDepartmentsOf(staff), tailorGrade: staff.tailorGrade,
         },
       }),
     },
@@ -472,7 +477,7 @@ router.post('/auth/2fa/verify', asyncHandler(async (req, res) => {
       staff: {
         id: staff.id, phone: staff.phone, displayName: staff.displayName, role: staff.role,
         store: staff.store, profileImageUrl: staff.profileImageUrl,
-        tailorDepartment: staff.tailorDepartment, tailorGrade: staff.tailorGrade,
+        tailorDepartment: staff.tailorDepartment, tailorDepartments: tailorDepartmentsOf(staff), tailorGrade: staff.tailorGrade,
       },
     },
   });
@@ -495,6 +500,7 @@ router.get('/auth/me', asyncHandler(async (req, res) => {
         store: staff.store,
         profileImageUrl: staff.profileImageUrl,
         tailorDepartment: staff.tailorDepartment,
+        tailorDepartments: tailorDepartmentsOf(staff),
         tailorGrade: staff.tailorGrade,
         // So the account screen can say whether two-factor is on and how many
         // recovery codes are left, without ever handing back the secret.
@@ -578,7 +584,9 @@ const buildInvoiceHtmlPayload = (body = {}) => {
     // the whole sum as outstanding even when it is marked Fully Paid.
     amountReceived: Number(body.amountReceived) || 0,
     paymentStatus: body.paymentStatus || 'partial_paid',
-    paymentMethod: ['transfer', 'card', 'pos', 'check', 'cash'].includes(body.paymentMethod) ? body.paymentMethod : 'transfer',
+    // Missing payment data must stay missing so validation can reject it;
+    // silently turning an empty selection into Transfer corrupts reconciliation.
+    paymentMethod: ['transfer', 'card', 'pos', 'check', 'cash'].includes(body.paymentMethod) ? body.paymentMethod : '',
     trackingToken: token,
     trackingUrl: body.trackingUrl || trackingUrlForToken(token),
     notes: body.notes,
@@ -681,7 +689,7 @@ const formatSentInvoice = (invoice) => {
     total: Number(invoice.total || 0),
     emailStatus: invoice.emailStatus === 'failed' ? 'Failed' : 'Sent',
     paymentStatus: paymentStatusLabel(invoice.paymentStatus),
-    paymentMethod: payload.paymentMethod ? paymentMethodLabel(payload.paymentMethod) : 'Transfer',
+    paymentMethod: payload.paymentMethod ? paymentMethodLabel(payload.paymentMethod) : '—',
     orderStatus: invoice.orderStatus || paymentStatusLabel(invoice.paymentStatus),
     accountApprovalStatus: payload.accountApprovalStatus || 'Pending Accounts',
     accountApprovalNote: payload.accountApprovalNote || '',
@@ -731,7 +739,7 @@ const formatSentInvoice = (invoice) => {
     dueDate: payload.dueDate || '',
     notes: payload.notes || '',
     storeKey: invoice.store,
-    paymentMethodKey: payload.paymentMethod || 'transfer',
+    paymentMethodKey: payload.paymentMethod || '',
     paymentStatusKey: invoice.paymentStatus,
   };
 };
@@ -972,6 +980,7 @@ router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, re
     store = 'all',
     dateOfBirth,
     tailorDepartment,
+    tailorDepartments,
     tailorGrade,
   } = req.body;
 
@@ -998,11 +1007,16 @@ router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, re
     return res.status(403).json({ success: false, message: 'Admin cannot create or change the Owner account' });
   }
 
-  if (role === 'tailor' && !tailorDepartment) {
+  const requestedTailorDepartments = [...new Set([
+    ...(Array.isArray(tailorDepartments) ? tailorDepartments : []),
+    tailorDepartment,
+  ].map((value) => String(value || '').trim()).filter(Boolean))];
+  if (role === 'tailor' && !requestedTailorDepartments.length) {
     return res.status(400).json({ success: false, message: 'A department is required for tailor accounts' });
   }
-  if (role === 'tailor' && !(await Department.findOne({ where: { key: tailorDepartment, status: 'active' } }))) {
-    return res.status(400).json({ success: false, message: 'Choose an active department for this tailor account' });
+  if (role === 'tailor') {
+    const activeCount = await Department.count({ where: { key: { [Op.in]: requestedTailorDepartments }, status: 'active' } });
+    if (activeCount !== requestedTailorDepartments.length) return res.status(400).json({ success: false, message: 'Choose only active departments for this tailor account' });
   }
 
   // Exactly one Owner account should exist at a time — the role that can
@@ -1031,7 +1045,8 @@ router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, re
     role,
     store: role === 'inventory_manager' ? 'all' : store,
     dateOfBirth: birthDate,
-    tailorDepartment,
+    tailorDepartment: requestedTailorDepartments[0] || null,
+    tailorDepartments: requestedTailorDepartments,
     tailorGrade,
   });
 
@@ -1049,6 +1064,7 @@ router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, re
         status: staffUser.status,
         dateOfBirth: staffUser.dateOfBirth,
         tailorDepartment: staffUser.tailorDepartment,
+        tailorDepartments: tailorDepartmentsOf(staffUser),
         tailorGrade: staffUser.tailorGrade,
       },
     },
@@ -1062,7 +1078,7 @@ router.get('/staff', asyncHandler(async (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   const staffUsers = await StaffUser.findAll({
     order: [['createdAt', 'DESC']],
-    attributes: ['id', 'phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'tailorDepartment', 'tailorGrade', 'twoFactorEnabledAt', 'twoFactorRequired', 'createdAt'],
+    attributes: ['id', 'phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'tailorDepartment', 'tailorDepartments', 'tailorGrade', 'twoFactorEnabledAt', 'twoFactorRequired', 'createdAt'],
   });
 
   res.json({ success: true, data: { staffUsers } });
@@ -1076,10 +1092,10 @@ router.patch('/staff/:id', requireRole('owner', 'admin'), asyncHandler(async (re
   if (req.staff.role === 'admin' && (staffUser.role === 'owner' || requestedUpdates.role === 'owner')) {
     return res.status(403).json({ success: false, message: 'Admin cannot edit or assign the Owner account' });
   }
-  const allowedFields = ['phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'dateOfBirth', 'tailorDepartment', 'tailorGrade'];
+  const allowedFields = ['phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'dateOfBirth', 'tailorDepartment', 'tailorDepartments', 'tailorGrade'];
   const updates = Object.fromEntries(allowedFields
     .filter((field) => Object.prototype.hasOwnProperty.call(requestedUpdates, field))
-    .map((field) => [field, requestedUpdates[field] || null]));
+    .map((field) => [field, field === 'tailorDepartments' ? requestedUpdates[field] : requestedUpdates[field] || null]));
   if (staffUser.role === 'owner') {
     if ('status' in updates && updates.status !== staffUser.status) {
       return res.status(403).json({ success: false, message: 'The Owner account cannot be deactivated' });
@@ -1112,18 +1128,24 @@ router.patch('/staff/:id', requireRole('owner', 'admin'), asyncHandler(async (re
 
   const resultingRole = updates.role || staffUser.role;
   if (resultingRole === 'inventory_manager') updates.store = 'all';
-  const resultingDepartment = 'tailorDepartment' in updates ? updates.tailorDepartment : staffUser.tailorDepartment;
+  const resultingDepartments = [...new Set([
+    ...(Array.isArray(updates.tailorDepartments) ? updates.tailorDepartments : tailorDepartmentsOf(staffUser)),
+    updates.tailorDepartment,
+  ].map((value) => String(value || '').trim()).filter(Boolean))];
   if (!updates.displayName && Object.prototype.hasOwnProperty.call(updates, 'displayName')) {
     return res.status(400).json({ success: false, message: 'Staff name is required' });
   }
   if (!updates.fullName && Object.prototype.hasOwnProperty.call(updates, 'fullName')) {
     return res.status(400).json({ success: false, message: 'Full name is required' });
   }
-  if (resultingRole === 'tailor' && !resultingDepartment) {
+  if (resultingRole === 'tailor' && !resultingDepartments.length) {
     return res.status(400).json({ success: false, message: 'A department is required for tailor accounts' });
   }
-  if (resultingRole === 'tailor' && !(await Department.findOne({ where: { key: resultingDepartment, status: 'active' } }))) {
-    return res.status(400).json({ success: false, message: 'Choose an active department for this tailor account' });
+  if (resultingRole === 'tailor') {
+    const activeCount = await Department.count({ where: { key: { [Op.in]: resultingDepartments }, status: 'active' } });
+    if (activeCount !== resultingDepartments.length) return res.status(400).json({ success: false, message: 'Choose only active departments for this tailor account' });
+    updates.tailorDepartments = resultingDepartments;
+    updates.tailorDepartment = resultingDepartments[0];
   }
   if (resultingRole === 'owner' && staffUser.role !== 'owner') {
     const existingOwner = await StaffUser.findOne({ where: { role: 'owner', id: { [Op.ne]: staffUser.id } } });
@@ -1136,6 +1158,7 @@ router.patch('/staff/:id', requireRole('owner', 'admin'), asyncHandler(async (re
   }
   if (resultingRole !== 'tailor') {
     updates.tailorDepartment = null;
+    updates.tailorDepartments = [];
     updates.tailorGrade = null;
   }
   // A PIN that has been reset has usually been reset because it was known to
@@ -1280,6 +1303,7 @@ router.patch('/staff/:id/tailor-grade', requireRole('owner'), asyncHandler(async
         id: tailor.id,
         displayName: tailor.displayName,
         tailorDepartment: tailor.tailorDepartment,
+        tailorDepartments: tailorDepartmentsOf(tailor),
         tailorGrade: tailor.tailorGrade,
       },
     },
@@ -1344,7 +1368,7 @@ router.get('/customers/duplicates', requireRole('owner', 'admin'), asyncHandler(
 }));
 
 router.post('/customers', asyncHandler(async (req, res) => {
-  const { fullName, phone, email, category = 'New', measurements = {} } = req.body;
+  const { fullName, phone, email, category = 'New', measurements = {}, preferredStore } = req.body;
 
   if (!fullName || !phone) {
     return res.status(400).json({
@@ -1375,16 +1399,41 @@ router.post('/customers', asyncHandler(async (req, res) => {
     return res.status(409).json({ success: false, message: `${existingPhone.fullName} already uses ${phone}` });
   }
 
+  // A Store Manager creates records on behalf of their assigned shop. Derive
+  // that location from the authenticated account rather than trusting a form
+  // field (or leaving it blank). Owner/Admin-created profiles may still carry
+  // an explicitly selected preferred store.
+  const assignedStore = req.staff?.role === 'store_manager' && !['all', 'production'].includes(req.staff.store)
+    ? storeShortLabel(req.staff.store)
+    : String(preferredStore || measurements?.profile?.preferredStore || '').trim();
+  const storedMeasurements = {
+    ...(measurements && typeof measurements === 'object' ? measurements : {}),
+    ...(assignedStore ? {
+      profile: {
+        ...(measurements?.profile || {}),
+        preferredStore: assignedStore,
+      },
+    } : {}),
+  };
+
   const customer = await Customer.create({
     fullName,
     phone,
     email: hasEmail ? String(email).trim() : null,
     category,
-    measurements,
+    measurements: storedMeasurements,
     portalToken: crypto.randomBytes(32).toString('hex'),
   });
 
-  res.status(201).json({ success: true, data: { customer } });
+  res.status(201).json({
+    success: true,
+    data: {
+      customer: {
+        ...customer.get({ plain: true }),
+        stores: assignedStore ? [assignedStore] : [],
+      },
+    },
+  });
 }));
 
 router.get('/customers', asyncHandler(async (req, res) => {
@@ -1528,7 +1577,12 @@ router.get('/customers', asyncHandler(async (req, res) => {
       lastActivityAt: [lastInvoice?.createdAt, profile.updatedAt]
         .filter(Boolean)
         .sort((first, second) => new Date(second) - new Date(first))[0] || profile.createdAt,
-      stores: [...new Set(profile.invoices.map((invoice) => storeShortLabel(invoice.store)))],
+      // A profile can exist before its first invoice. Keep its originating /
+      // preferred store visible, then add any stores it has ordered from.
+      stores: [...new Set([
+        profile.measurements?.profile?.preferredStore,
+        ...profile.invoices.map((invoice) => storeShortLabel(invoice.store)),
+      ].filter(Boolean))],
       createdAt: profile.createdAt,
     };
   }).sort((first, second) => new Date(second.lastOrderAt || second.createdAt) - new Date(first.lastOrderAt || first.createdAt));
@@ -1659,34 +1713,44 @@ router.post('/invoices', asyncHandler(async (req, res) => {
 
 router.post('/invoices/html-preview', (req, res) => {
   const payload = buildInvoiceHtmlPayload(req.body);
+  const paymentStatus = normalisedPaymentStatus(payload.paymentStatus);
+  const validPaymentMethods = ['transfer', 'card', 'pos', 'check', 'cash'];
+  if (paymentStatus !== 'unpaid' && !validPaymentMethods.includes(req.body.paymentMethod)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Select a payment method for a partially or fully paid invoice',
+    });
+  }
 
   const html = createTwifInvoiceHtml(payload);
   res.type('html').send(html);
 });
 
 const tailorHasDepartmentWork = (staff, orderSheet = {}) => {
-  if (staff?.role !== 'tailor' || !staff.displayName || !staff.tailorDepartment) return false;
+  const staffDepartments = tailorDepartmentsOf(staff);
+  if (staff?.role !== 'tailor' || !staff.displayName || !staffDepartments.length) return false;
   const items = Array.isArray(orderSheet.items) ? orderSheet.items : [];
   if (items.length) {
     return items.some((item) => (
       Array.isArray(item.tailors) && item.tailors.includes(staff.displayName)
-      && Array.isArray(item.departments) && item.departments.includes(staff.tailorDepartment)
+      && Array.isArray(item.departments) && item.departments.some((department) => staffDepartments.includes(department))
     ));
   }
   const assigned = (Array.isArray(orderSheet.tailors) && orderSheet.tailors.includes(staff.displayName))
     || orderSheet.tailor === staff.displayName;
   const departments = Array.isArray(orderSheet.departments) ? orderSheet.departments : [];
-  return assigned && (!departments.length || departments.includes(staff.tailorDepartment));
+  return assigned && (!departments.length || departments.some((department) => staffDepartments.includes(department)));
 };
 
 const invoiceForStaff = (invoice, staff) => {
   const formatted = formatSentInvoice(invoice);
   if (staff?.role !== 'tailor' || !Array.isArray(formatted.orderSheet?.items)) return formatted;
+  const staffDepartments = tailorDepartmentsOf(staff);
   const keptIndexes = formatted.orderSheet.items
     .map((item, index) => ({ item, index }))
     .filter(({ item }) => (
       Array.isArray(item.tailors) && item.tailors.includes(staff.displayName)
-      && Array.isArray(item.departments) && item.departments.includes(staff.tailorDepartment)
+      && Array.isArray(item.departments) && item.departments.some((department) => staffDepartments.includes(department))
     ));
   if (!keptIndexes.length) return formatted;
   return {
@@ -1755,6 +1819,14 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   }
 
   const payload = buildInvoiceHtmlPayload(req.body);
+  const paymentStatus = normalisedPaymentStatus(payload.paymentStatus);
+  const validPaymentMethods = ['transfer', 'card', 'pos', 'check', 'cash'];
+  if (paymentStatus !== 'unpaid' && !validPaymentMethods.includes(req.body.paymentMethod)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Select a payment method for a partially or fully paid invoice',
+    });
+  }
   if (req.staff?.role === 'store_manager' && req.staff.store !== 'all' && normalizeStoreKey(payload.store) !== req.staff.store) {
     return res.status(403).json({ success: false, message: 'You may only create invoices for your assigned store' });
   }
@@ -1795,7 +1867,7 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   // under a "Fully Paid" badge.
   const amountAtCreation = Number.isFinite(requestedAmount) && requestedAmount > 0
     ? requestedAmount
-    : (normalisedPaymentStatus(payload.paymentStatus) === 'fully_paid' ? payableTotal : 0);
+    : (paymentStatus === 'fully_paid' ? payableTotal : 0);
 
   // One payload for the document, the plain-text alternative and the record, so
   // the three cannot disagree about what is still owed.
@@ -2545,12 +2617,13 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   let departmentReadyItems = null;
   if (isTailorOnly && req.body.status === 'Ready'
       && Array.isArray(previousOrderSheet.items) && previousOrderSheet.items.length) {
-    const myDepartment = req.staff.tailorDepartment;
+    const myDepartments = tailorDepartmentsOf(req.staff);
     departmentReadyItems = previousOrderSheet.items.map((item) => {
-      const owns = Array.isArray(item.departments) && item.departments.includes(myDepartment)
-        && Array.isArray(item.tailors) && item.tailors.includes(req.staff.displayName);
+      const ownedDepartments = Array.isArray(item.departments)
+        ? item.departments.filter((department) => myDepartments.includes(department)) : [];
+      const owns = ownedDepartments.length && Array.isArray(item.tailors) && item.tailors.includes(req.staff.displayName);
       if (!owns) return item;
-      return { ...item, departmentReady: { ...(item.departmentReady || {}), [myDepartment]: true } };
+      return { ...item, departmentReady: { ...(item.departmentReady || {}), ...Object.fromEntries(ownedDepartments.map((department) => [department, true])) } };
     });
   }
   const allDepartmentsReady = (items) => items.every((item) => (
@@ -2661,15 +2734,15 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
     // The order as a whole isn't ready yet — only this tailor's department
     // is — so whoever's tracking the job hears exactly that, not something
     // implying the customer's whole order just became ready.
-    const myDepartment = req.staff.tailorDepartment;
-    const finishedItems = departmentReadyItems
-      .filter((item, index) => item.departmentReady?.[myDepartment] && previousOrderSheet.items[index]?.departmentReady?.[myDepartment] !== true)
-      .map((item) => item.item || 'an item');
-    if (finishedItems.length) {
+    const myDepartments = tailorDepartmentsOf(req.staff);
+    const finished = departmentReadyItems.flatMap((item, index) => myDepartments
+      .filter((department) => item.departmentReady?.[department] && previousOrderSheet.items[index]?.departmentReady?.[department] !== true)
+      .map((department) => ({ department, item: item.item || 'an item' })));
+    if (finished.length) {
       await notifyRoles(
         ['store_manager', 'production_manager', 'owner', 'admin'],
-        `${req.staff.displayName} finished the ${myDepartment} work on ${finishedItems.join(', ')} for ${invoice.invoiceNumber} — other departments are still outstanding.`,
-        { invoiceNumber: invoice.invoiceNumber, event: 'department_ready', department: myDepartment }
+        `${req.staff.displayName} finished ${finished.map(({ department, item }) => `${department} on ${item}`).join(', ')} for ${invoice.invoiceNumber} — other departments are still outstanding.`,
+        { invoiceNumber: invoice.invoiceNumber, event: 'department_ready', departments: [...new Set(finished.map(({ department }) => department))] }
       );
     }
   }
@@ -2937,10 +3010,10 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
       }
       const staffTailors = await StaffUser.findAll({
         where: { displayName: { [Op.in]: names }, role: 'tailor', status: 'active' },
-        attributes: ['displayName', 'tailorDepartment'],
+        attributes: ['displayName', 'tailorDepartment', 'tailorDepartments'],
       });
       const byName = new Map(staffTailors.map((tailor) => [tailor.displayName, tailor]));
-      const invalid = names.find((name) => !byName.has(name) || !departments.includes(byName.get(name).tailorDepartment));
+      const invalid = names.find((name) => !byName.has(name) || !departments.some((department) => tailorDepartmentsOf(byName.get(name)).includes(department)));
       if (invalid) {
         return res.status(400).json({ success: false, message: `${invalid} is not an active tailor in this item's department` });
       }
@@ -4051,7 +4124,7 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
           store: storeShortLabel(invoice.store),
           total: Number(invoice.total || 0),
           paymentStatus: paymentStatusLabel(invoice.paymentStatus),
-          paymentMethod: invoice.payload?.paymentMethod ? paymentMethodLabel(invoice.payload.paymentMethod) : 'Transfer',
+          paymentMethod: invoice.payload?.paymentMethod ? paymentMethodLabel(invoice.payload.paymentMethod) : '—',
           approvalStatus: invoice.payload?.accountApprovalStatus || 'Pending Accounts',
           orderStatus: invoice.payload?.orderSheet?.status || invoice.orderStatus,
         })),
