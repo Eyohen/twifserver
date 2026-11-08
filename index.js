@@ -152,6 +152,12 @@ const changePinLimiter = rateLimit({
   legacyHeaders: false,
 });
 app.use('/api/oms/auth/change-pin', changePinLimiter);
+// The other route that checks a PIN against a session. It shares the same
+// counter, so wrong guesses cannot be split between the two routes to get
+// more attempts. Only DELETE checks the PIN; uploads are left alone.
+app.use('/api/oms/staff/:phone/profile-image', (req, res, next) => (
+  req.method === 'DELETE' ? changePinLimiter(req, res, next) : next()
+));
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/discover', discoverRoutes);
