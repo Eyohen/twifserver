@@ -134,6 +134,24 @@ const staffLoginLimiter = rateLimit({
 });
 
 app.use('/api/oms/auth/login', staffLoginLimiter);
+
+// Changing your own PIN asks for the current one, so without a limit a stolen
+// session could be used to guess it. Wrong guesses are counted per session
+// (the token, hashed), not per address, so rotating IPs does not help; a
+// correct change is not counted.
+const changePinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.STAFF_PIN_CHANGE_RATE_LIMIT_MAX) || 5,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => `pin:${require('crypto').createHash('sha256').update(String(req.headers.authorization || 'anonymous')).digest('hex')}`,
+  message: {
+    success: false,
+    message: 'Too many incorrect PIN attempts. Please wait a few minutes and try again.',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/oms/auth/change-pin', changePinLimiter);
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/discover', discoverRoutes);

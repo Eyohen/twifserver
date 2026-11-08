@@ -1787,6 +1787,15 @@ const tailorHasDepartmentWork = (staff, orderSheet = {}) => {
   return assigned && (!departments.length || departments.some((department) => staffDepartments.includes(department)));
 };
 
+// Only the archive routes may set or clear these. Anything a client sends under
+// these names on a generic save or create is dropped, so archiving cannot be
+// done (or undone) by a store manager editing their own order sheet, and the
+// Owner/Admin-only rule and the "not while a tailor is working it" check hold.
+const ARCHIVE_FIELDS = ['archivedAt', 'archivedByName', 'orderSheetArchivedAt'];
+const withoutArchiveFields = (fields) => Object.fromEntries(
+  Object.entries(fields && typeof fields === 'object' ? fields : {}).filter(([key]) => !ARCHIVE_FIELDS.includes(key))
+);
+
 // An archived order sheet stays on file but is hidden from every list, the
 // Production board and a tailor's tasks, as if it were not there. Archiving
 // never deletes it, so it can be restored.
@@ -2447,7 +2456,7 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
     trackingUrl: payload.trackingUrl || trackingUrlForToken(resolvedToken),
     orderSheet: {
       ...(payload.orderSheet?.archivedAt ? {} : (payload.orderSheet || {})),
-      ...orderSheet,
+      ...withoutArchiveFields(orderSheet),
       // An order sheet belongs to its invoice's store. Never trust a second
       // client-selected location that can disagree with the invoice record.
       store: storeShortLabel(invoice.store),
@@ -2727,7 +2736,8 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       ? req.body
       : Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => !INVOICE_OWNED_FIELDS.includes(key))));
 
-  const proposedOrderSheet = { ...previousOrderSheet, ...incomingChanges };
+  // previousOrderSheet keeps any archive state, since it is no longer overwritable here.
+  const proposedOrderSheet = { ...previousOrderSheet, ...withoutArchiveFields(incomingChanges) };
   if (PRODUCTION_ASSIGNMENT_LOCKED_STATUSES.has(previousOrderSheet.status)
       && productionAssignmentChanged(previousOrderSheet, proposedOrderSheet)) {
     return res.status(409).json({
