@@ -513,6 +513,28 @@ router.get('/auth/me', asyncHandler(async (req, res) => {
   });
 }));
 
+// Any signed-in member of staff can change their own PIN. The current PIN is
+// asked for again so a borrowed or left-open session cannot quietly take the
+// account over. Changing it ends every session, this one included, exactly as
+// an Owner reset does.
+router.post('/auth/change-pin', asyncHandler(async (req, res) => {
+  const currentPin = String(req.body?.currentPin ?? '').trim();
+  const newPin = String(req.body?.newPin ?? '').trim();
+  const staffUser = await StaffUser.findByPk(req.staff.id);
+  if (!staffUser) return res.status(404).json({ success: false, message: 'Staff account not found' });
+  if (!currentPin || !(await bcrypt.compare(currentPin, staffUser.pinHash))) {
+    return res.status(403).json({ success: false, message: 'Your current PIN is not correct' });
+  }
+  if (newPin.length < 4) {
+    return res.status(400).json({ success: false, message: 'A PIN must be at least 4 characters' });
+  }
+  if (newPin === currentPin) {
+    return res.status(400).json({ success: false, message: 'Choose a PIN different from your current one' });
+  }
+  await staffUser.update({ pinHash: await bcrypt.hash(newPin, 12), forceLogoutAt: new Date() });
+  res.json({ success: true, message: 'PIN changed. Sign in again with your new PIN.' });
+}));
+
 // Lower case, like the brand everywhere else it is read. Numbers already
 // issued keep the form they were issued in.
 const invoiceNumber = () => {
@@ -707,6 +729,8 @@ const formatSentInvoice = (invoice) => {
     trackingToken: payload.trackingToken || trackingTokenFromUrl(payload.trackingUrl),
     trackingUrl: payload.trackingUrl || (payload.trackingToken ? trackingUrlForToken(payload.trackingToken) : ''),
     orderSheet: payload.orderSheet || null,
+    archivedAt: payload.archivedAt || null,
+    archivedByName: payload.archivedByName || '',
     // The image itself is not sent with the list. Payment evidence is a
     // photograph of a transfer, and returning every one of them made this
     // response 9.6 MB — fetched again on every change of view, which is what
@@ -999,6 +1023,12 @@ router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, re
   if (normalizedEmail && await StaffUser.findOne({ where: { email: normalizedEmail } })) {
     return res.status(409).json({ success: false, message: 'That email address is already assigned to a staff account' });
   }
+  // Said plainly here, rather than left to the database's unique index, which
+  // surfaces only as a generic "Resource already exists".
+  const phoneOwner = await StaffUser.findOne({ where: { phone: String(phone).trim() } });
+  if (phoneOwner) {
+    return res.status(409).json({ success: false, message: `That phone number is already assigned to ${phoneOwner.displayName}'s staff account` });
+  }
   const birthDate = dateOrNull(dateOfBirth);
 
   const problem = staffFieldProblem({ role, store, status: req.body.status });
@@ -1111,6 +1141,10 @@ router.patch('/staff/:id', requireRole('owner', 'admin'), asyncHandler(async (re
   if ('phone' in updates) {
     const invalidPhone = phoneProblem(updates.phone);
     if (invalidPhone) return res.status(400).json({ success: false, message: invalidPhone });
+    const phoneOwner = await StaffUser.findOne({ where: { phone: String(updates.phone).trim(), id: { [Op.ne]: staffUser.id } } });
+    if (phoneOwner) {
+      return res.status(409).json({ success: false, message: `That phone number is already assigned to ${phoneOwner.displayName}'s staff account` });
+    }
   }
   if ('email' in updates) {
     updates.email = String(updates.email || '').trim().toLowerCase() || null;
@@ -1220,7 +1254,17 @@ router.delete('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) 
   if (staffUser.role === 'owner') {
     return res.status(403).json({ success: false, message: 'The Owner account cannot be deleted' });
   }
-  await staffUser.destroy();
+  // Sign-in history is personal to the account (IP address, device, phone) and
+  // is matched by phone number as well as id, so leaving it behind would hand
+  // it to whoever is later given that number. Business records such as the
+  // invoices they raised are deliberately kept.
+  await db.sequelize.transaction(async (transaction) => {
+    await StaffLoginEvent.destroy({
+      where: { [Op.or]: [{ staffUserId: staffUser.id }, { phone: staffUser.phone }] },
+      transaction,
+    });
+    await staffUser.destroy({ transaction });
+  });
   res.json({ success: true, message: 'Staff account deleted' });
 }));
 
@@ -1727,6 +1771,7 @@ router.post('/invoices/html-preview', (req, res) => {
 });
 
 const tailorHasDepartmentWork = (staff, orderSheet = {}) => {
+  if (orderSheet?.archivedAt) return false;
   const staffDepartments = tailorDepartmentsOf(staff);
   if (staff?.role !== 'tailor' || !staff.displayName || !staffDepartments.length) return false;
   const items = Array.isArray(orderSheet.items) ? orderSheet.items : [];
@@ -1742,8 +1787,15 @@ const tailorHasDepartmentWork = (staff, orderSheet = {}) => {
   return assigned && (!departments.length || departments.some((department) => staffDepartments.includes(department)));
 };
 
+// An archived order sheet stays on file but is hidden from every list, the
+// Production board and a tailor's tasks, as if it were not there. Archiving
+// never deletes it, so it can be restored.
+const hideArchivedSheet = (formatted) => (formatted.orderSheet?.archivedAt
+  ? { ...formatted, orderSheet: null, orderSheetArchivedAt: formatted.orderSheet.archivedAt }
+  : formatted);
+
 const invoiceForStaff = (invoice, staff) => {
-  const formatted = formatSentInvoice(invoice);
+  const formatted = hideArchivedSheet(formatSentInvoice(invoice));
   if (staff?.role !== 'tailor' || !Array.isArray(formatted.orderSheet?.items)) return formatted;
   const staffDepartments = tailorDepartmentsOf(staff);
   const keptIndexes = formatted.orderSheet.items
@@ -1768,8 +1820,16 @@ router.get('/invoices/sent', asyncHandler(async (req, res) => {
   // invoices; 'all' (and every other role) is unrestricted. Customers are
   // deliberately left unscoped elsewhere — only invoices/order sheets are.
   const scopedToOwnStore = req.staff?.role === 'store_manager' && req.staff.store && req.staff.store !== 'all';
+  // Archived invoices are left out of every list. The Owner and Admin can ask
+  // for the archived ones alone (?archived=true) to look at or restore them.
+  const wantsArchived = String(req.query.archived || '') === 'true' && ['owner', 'admin'].includes(req.staff?.role);
   const rows = await SentInvoice.findAll({
-    where: scopedToOwnStore ? { store: req.staff.store } : {},
+    where: {
+      ...(scopedToOwnStore ? { store: req.staff.store } : {}),
+      [Op.and]: [db.sequelize.literal(wantsArchived
+        ? `("SentInvoice"."payload"->>'archivedAt') IS NOT NULL`
+        : `("SentInvoice"."payload"->>'archivedAt') IS NULL`)],
+    },
     order: [['createdAt', 'DESC']],
     limit: 100,
   });
@@ -1798,6 +1858,9 @@ router.get('/invoices/sent/:invoiceNumber', asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Invoice not found' });
   }
   if (req.staff?.role === 'tailor' && !tailorHasDepartmentWork(req.staff, invoice.payload?.orderSheet)) {
+    return res.status(404).json({ success: false, message: 'Invoice not found' });
+  }
+  if (invoice.payload?.archivedAt && !['owner', 'admin'].includes(req.staff?.role)) {
     return res.status(404).json({ success: false, message: 'Invoice not found' });
   }
 
@@ -1995,10 +2058,14 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   });
 
   if (!result.success) {
+    // The invoice itself is already saved, so hand it back: the screen can then
+    // list it and offer a resend instead of leaving the user to guess.
+    const savedInvoice = await SentInvoice.findOne({ where: { invoiceNumber: payload.invoiceNumber } });
     return res.status(502).json({
       success: false,
       message: 'Invoice saved, but the email could not be sent',
       error: result.error,
+      data: savedInvoice ? { invoiceNumber: payload.invoiceNumber, sentInvoice: formatSentInvoice(savedInvoice) } : undefined,
     });
   }
 
@@ -2362,6 +2429,16 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'You may only create order sheets for your assigned store.' });
   }
 
+  // The interface blocks this too, but a rule only the screen applies is a
+  // suggestion: refuse an order sheet whose garments are missing a department
+  // or any of that department's required details.
+  if (Array.isArray(orderSheet.items) && orderSheet.items.length) {
+    const incompleteDetails = departmentBlockReason(orderSheet);
+    if (incompleteDetails) {
+      return res.status(400).json({ success: false, message: `Complete the required department details: ${incompleteDetails}` });
+    }
+  }
+
   const payload = invoice.payload || {};
   const resolvedToken = payload.trackingToken || token || trackingTokenFromUrl(payload.trackingUrl) || trackingToken();
   const nextPayload = {
@@ -2369,7 +2446,7 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
     trackingToken: resolvedToken,
     trackingUrl: payload.trackingUrl || trackingUrlForToken(resolvedToken),
     orderSheet: {
-      ...(payload.orderSheet || {}),
+      ...(payload.orderSheet?.archivedAt ? {} : (payload.orderSheet || {})),
       ...orderSheet,
       // An order sheet belongs to its invoice's store. Never trust a second
       // client-selected location that can disagree with the invoice record.
@@ -2377,7 +2454,7 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
       status: orderSheet.status || payload.orderSheet?.status || 'Order Sheet Confirmed',
       // Kept from the first save, so lead time is measured from the day the
       // order could have been worked rather than the day the invoice was sent.
-      createdAt: payload.orderSheet?.createdAt || new Date().toISOString(),
+      createdAt: (!payload.orderSheet?.archivedAt && payload.orderSheet?.createdAt) || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
   };
@@ -2591,6 +2668,17 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
       success: false,
       message: 'A tailor may only mark a job In Progress or Ready',
     });
+  }
+
+  // Same rule on edit, but only when the store side actually changes the
+  // items. Production and tailor updates echo the whole sheet back, and an
+  // older sheet that was never complete must not lock them out.
+  if (isPrivilegedEditor && !isProductionManager && Array.isArray(req.body?.items) && req.body.items.length
+      && JSON.stringify(req.body.items) !== JSON.stringify(previousOrderSheet.items || [])) {
+    const incompleteDetails = departmentBlockReason({ items: req.body.items });
+    if (incompleteDetails) {
+      return res.status(400).json({ success: false, message: `Complete the required department details: ${incompleteDetails}` });
+    }
   }
 
   // A Production Manager legitimately needs broad access here — fabric,
@@ -2890,6 +2978,71 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
     { invoiceNumber: invoice.invoiceNumber, event: 'invoice_edited' });
 
   res.json({ success: true, data: { invoice: formatSentInvoice(invoice) } });
+}));
+
+// Archiving takes an invoice (or just its order sheet) out of every list
+// without deleting it. Unlike deleting, it is allowed once Accounts have
+// approved the invoice, because nothing is removed from the books. Only work a
+// tailor is in the middle of must be stopped first. Send { archived: false }
+// to restore.
+const ARCHIVE_BLOCKING_STATUSES = ['Assigned', 'In Progress'];
+const archiveBlockedByWork = (payload) => {
+  const status = payload.orderSheet?.status;
+  return ARCHIVE_BLOCKING_STATUSES.includes(status)
+    ? `This order is ${status.toLowerCase()} in production. Stop it there before archiving.`
+    : null;
+};
+
+router.patch('/invoices/:invoiceNumber/archive', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+  const payload = invoice.payload || {};
+  const archiving = req.body?.archived !== false;
+
+  if (archiving) {
+    if (payload.archivedAt) return res.status(409).json({ success: false, message: 'That invoice is already archived' });
+    const blocked = archiveBlockedByWork(payload);
+    if (blocked) return res.status(409).json({ success: false, message: blocked });
+    await invoice.update({ payload: { ...payload, archivedAt: new Date().toISOString(), archivedByName: req.staff.displayName } });
+  } else {
+    if (!payload.archivedAt) return res.status(409).json({ success: false, message: 'That invoice is not archived' });
+    const { archivedAt: _at, archivedByName: _by, ...restored } = payload;
+    await invoice.update({ payload: restored });
+  }
+  await notifyRoles(['owner', 'admin'],
+    `${req.staff.displayName} ${archiving ? 'archived' : 'restored'} invoice ${invoice.invoiceNumber} for ${invoice.customerName}.`,
+    { invoiceNumber: invoice.invoiceNumber, event: archiving ? 'invoice_archived' : 'invoice_restored' });
+  res.json({ success: true, message: archiving ? 'Invoice archived' : 'Invoice restored', data: { invoiceNumber: invoice.invoiceNumber, archived: archiving } });
+}));
+
+router.patch('/invoices/:invoiceNumber/order-sheet/archive', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+  const payload = invoice.payload || {};
+  const sheet = payload.orderSheet;
+  if (!sheet) return res.status(404).json({ success: false, message: 'This invoice has no order sheet' });
+  const archiving = req.body?.archived !== false;
+
+  let nextSheet;
+  if (archiving) {
+    if (sheet.archivedAt) return res.status(409).json({ success: false, message: 'That order sheet is already archived' });
+    const blocked = archiveBlockedByWork(payload);
+    if (blocked) return res.status(409).json({ success: false, message: blocked });
+    nextSheet = { ...sheet, archivedAt: new Date().toISOString(), archivedByName: req.staff.displayName };
+  } else {
+    if (!sheet.archivedAt) return res.status(409).json({ success: false, message: 'That order sheet is not archived' });
+    const { archivedAt: _at, archivedByName: _by, ...restored } = sheet;
+    nextSheet = restored;
+  }
+  await invoice.update({ payload: { ...payload, orderSheet: nextSheet } });
+  await notifyRoles(['owner', 'admin'],
+    `${req.staff.displayName} ${archiving ? 'archived' : 'restored'} the order sheet for ${invoice.invoiceNumber}.`,
+    { invoiceNumber: invoice.invoiceNumber, event: archiving ? 'order_sheet_archived' : 'order_sheet_restored' });
+  res.json({
+    success: true,
+    message: archiving ? 'Order sheet archived' : 'Order sheet restored',
+    data: { invoice: invoiceForStaff(invoice, req.staff) },
+  });
 }));
 
 router.delete('/invoices/:invoiceNumber', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
