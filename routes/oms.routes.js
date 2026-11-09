@@ -531,7 +531,7 @@ router.post('/auth/change-pin', asyncHandler(async (req, res) => {
   if (newPin === currentPin) {
     return res.status(400).json({ success: false, message: 'Choose a PIN different from your current one' });
   }
-  await staffUser.update({ pinHash: await bcrypt.hash(newPin, 12), forceLogoutAt: new Date() });
+  await staffUser.update({ pinHash: await bcrypt.hash(newPin, 12), forceLogoutAt: new Date(), pinChangedAt: new Date() });
   res.json({ success: true, message: 'PIN changed. Sign in again with your new PIN.' });
 }));
 
@@ -1068,6 +1068,7 @@ router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, re
     phone,
     email: normalizedEmail,
     pinHash,
+    pinChangedAt: new Date(),
     // Older clients only sent displayName. Keep them working while storing
     // the two names independently for every new Owner-managed account.
     fullName: String(fullName || displayName).trim(),
@@ -1108,7 +1109,7 @@ router.get('/staff', asyncHandler(async (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   const staffUsers = await StaffUser.findAll({
     order: [['createdAt', 'DESC']],
-    attributes: ['id', 'phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'tailorDepartment', 'tailorDepartments', 'tailorGrade', 'twoFactorEnabledAt', 'twoFactorRequired', 'createdAt'],
+    attributes: ['id', 'phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'pinChangedAt', 'tailorDepartment', 'tailorDepartments', 'tailorGrade', 'twoFactorEnabledAt', 'twoFactorRequired', 'createdAt'],
   });
 
   res.json({ success: true, data: { staffUsers } });
@@ -1203,6 +1204,7 @@ router.patch('/staff/:id', requireRole('owner', 'admin'), asyncHandler(async (re
     }
     updates.pinHash = await bcrypt.hash(String(pin).trim(), 12);
     updates.forceLogoutAt = new Date();
+    updates.pinChangedAt = new Date();
   }
 
   await staffUser.update(updates);
@@ -1240,12 +1242,21 @@ router.get('/staff/:id/logins', requireRole('owner', 'admin'), asyncHandler(asyn
 
   // Matched on the phone number as well as the id, so attempts against a number
   // that belongs to nobody yet — or to an account created later — still show.
+  const belongsToAccount = { [Op.or]: [{ staffUserId: staffUser.id }, { phone: staffUser.phone }] };
   const events = await StaffLoginEvent.findAll({
-    where: { [Op.or]: [{ staffUserId: staffUser.id }, { phone: staffUser.phone }] },
+    where: belongsToAccount,
     order: [['createdAt', 'DESC']],
     limit: 100,
   });
-  res.json({ success: true, data: { events } });
+  // The last 30 days, counted in the database so the totals are right even when
+  // there are more than the 100 rows returned above. A failed attempt is any
+  // sign-in that did not succeed (wrong PIN, or an inactive account).
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const [successful30d, failed30d] = await Promise.all([
+    StaffLoginEvent.count({ where: { ...belongsToAccount, outcome: 'success', createdAt: { [Op.gte]: since } } }),
+    StaffLoginEvent.count({ where: { ...belongsToAccount, outcome: { [Op.ne]: 'success' }, createdAt: { [Op.gte]: since } } }),
+  ]);
+  res.json({ success: true, data: { events, summary: { successful30d, failed30d, days: 30 } } });
 }));
 
 router.delete('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) => {

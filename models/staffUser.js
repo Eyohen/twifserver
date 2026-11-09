@@ -118,6 +118,13 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.DATE,
       allowNull: true,
     },
+    // When this account's PIN was last set — at creation, by an Owner/Admin
+    // reset, or by the member of staff changing their own. Null on accounts
+    // that existed before this was recorded.
+    pinChangedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
   }, {
     tableName: 'StaffUsers',
     timestamps: true,
