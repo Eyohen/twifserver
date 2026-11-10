@@ -2045,6 +2045,25 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     || existingState.archivedAt
     || (existingState.accountApprovalStatus && existingState.accountApprovalStatus !== 'Pending Accounts')
   ));
+  // The store check at the top reads the store from the request body, which
+  // says nothing about an invoice that already exists. Hold a re-send to the
+  // same rules as reading or editing the stored invoice, so it cannot be used
+  // to email out, or overwrite, another store's or an archived invoice.
+  if (existingInvoice) {
+    const staffRole = req.staff?.role;
+    const outsideOwnStore = staffRole === 'store_manager' && req.staff.store !== 'all'
+      && normalizeStoreKey(existingInvoice.store) !== normalizeStoreKey(req.staff.store);
+    const archivedForThem = existingState.archivedAt && !['owner', 'admin'].includes(staffRole);
+    if (outsideOwnStore || archivedForThem) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    if (!recordHasMovedOn && !mayEditInvoice(req.staff, existingInvoice)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only the person who raised this invoice, or an Owner or Admin, can change it',
+      });
+    }
+  }
   let emailHtml = html;
   let emailText = plainTextInvoice(payload);
   if (recordHasMovedOn) {
