@@ -2051,7 +2051,12 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   // to email out, or overwrite, another store's or an archived invoice.
   if (existingInvoice) {
     const staffRole = req.staff?.role;
-    const outsideOwnStore = staffRole === 'store_manager' && req.staff.store !== 'all'
+    // Tailors, production and inventory staff have no business re-sending an
+    // invoice, and read it only through the job screens' own rules.
+    if (!['owner', 'admin', 'store_manager', 'accounts'].includes(staffRole)) {
+      return res.status(403).json({ success: false, message: 'You do not have permission to re-send invoices' });
+    }
+    const outsideOwnStore =staffRole === 'store_manager' && req.staff.store !== 'all'
       && normalizeStoreKey(existingInvoice.store) !== normalizeStoreKey(req.staff.store);
     const archivedForThem = existingState.archivedAt && !['owner', 'admin'].includes(staffRole);
     if (outsideOwnStore || archivedForThem) {
