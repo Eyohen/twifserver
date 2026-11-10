@@ -352,6 +352,41 @@ const startServer = async () => {
         console.log('Schema check: dropped NOT NULL on Customers.phone');
       }
 
+      // The Owner-protection trigger on StaffUsers ended in `RETURN NEW`, which
+      // is NULL for a DELETE, and a NULL from a BEFORE trigger silently cancels
+      // the delete: every staff deletion reported success and changed nothing.
+      // Migration 20261110000001 fixes it, but production never runs
+      // migrations, so the same one-statement repair runs here. It only
+      // replaces the function body and is a no-op once applied.
+      const ownerGuard = await queryInterface.sequelize.query(
+        "SELECT pg_get_functiondef(p.oid) AS def FROM pg_proc p WHERE p.proname = 'protect_twif_owner_account'",
+        { type: 'SELECT' }
+      ).catch(() => []);
+      if (ownerGuard[0]?.def && !/RETURN OLD/i.test(ownerGuard[0].def)) {
+        await queryInterface.sequelize.query(`
+          CREATE OR REPLACE FUNCTION protect_twif_owner_account()
+          RETURNS trigger AS $function$
+          BEGIN
+            IF TG_OP = 'DELETE' AND OLD.role::text = 'owner' THEN
+              RAISE EXCEPTION 'The Owner account cannot be deleted';
+            END IF;
+            IF TG_OP = 'UPDATE' AND OLD.role::text = 'owner' AND (
+              NEW.role::text <> 'owner'
+              OR NEW.status::text <> 'active'
+              OR NEW.store <> 'all'
+            ) THEN
+              RAISE EXCEPTION 'The Owner role, status, and store assignment are protected';
+            END IF;
+            IF TG_OP = 'DELETE' THEN
+              RETURN OLD;
+            END IF;
+            RETURN NEW;
+          END;
+          $function$ LANGUAGE plpgsql;
+        `);
+        console.log('Schema check: repaired the owner-protection trigger so staff deletes take effect');
+      }
+
       // When the generic check adds these new columns to an existing live
       // Departments table, populate only that first deployment. An owner who
       // later intentionally removes every parameter keeps the empty list.

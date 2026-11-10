@@ -16,6 +16,9 @@ module.exports = {
         ) THEN
           RAISE EXCEPTION 'The Owner role, status, and store assignment are protected';
         END IF;
+        IF TG_OP = 'DELETE' THEN
+          RETURN OLD;
+        END IF;
         RETURN NEW;
       END;
       $function$ LANGUAGE plpgsql;

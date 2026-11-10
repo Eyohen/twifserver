@@ -1276,6 +1276,11 @@ router.delete('/staff/:id', requireRole('owner'), asyncHandler(async (req, res) 
     });
     await staffUser.destroy({ transaction });
   });
+  // A database trigger can cancel a delete without raising an error, and the
+  // account then stays on the list while this route says it is gone. Check.
+  if (await StaffUser.findByPk(staffUser.id, { attributes: ['id'] })) {
+    return res.status(500).json({ success: false, message: 'That account could not be deleted. Nothing was changed.' });
+  }
   res.json({ success: true, message: 'Staff account deleted' });
 }));
 
@@ -2028,6 +2033,38 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     },
   };
 
+  // Sending is also how an invoice is re-sent. The record above is built from
+  // the form alone, and upserting it over an invoice that has moved on wiped
+  // the order sheet, the archive flags and Accounts' decision (an approved
+  // invoice went back to "Pending Accounts"; an archived sheet disappeared).
+  // Once an invoice has an order sheet, a decision or an archive, a re-send may
+  // change who it is emailed to and nothing else.
+  const existingState = existingInvoice?.payload || {};
+  const recordHasMovedOn = Boolean(existingInvoice && (
+    existingState.orderSheet
+    || existingState.archivedAt
+    || (existingState.accountApprovalStatus && existingState.accountApprovalStatus !== 'Pending Accounts')
+  ));
+  let emailHtml = html;
+  let emailText = plainTextInvoice(payload);
+  if (recordHasMovedOn) {
+    Object.assign(invoiceRecord, {
+      store: existingInvoice.store,
+      customerId: existingInvoice.customerId,
+      customerName: existingInvoice.customerName,
+      customerPhone: existingInvoice.customerPhone,
+      createdByStaffId: existingInvoice.createdByStaffId,
+      createdByName: existingInvoice.createdByName,
+      total: existingInvoice.total,
+      paymentStatus: existingInvoice.paymentStatus,
+      orderStatus: existingInvoice.orderStatus,
+      customerEmail: recipientEmail || existingInvoice.customerEmail,
+      payload: { ...existingState, recipientEmail: recipientEmail || existingState.recipientEmail },
+    });
+    emailHtml = createTwifInvoiceHtml(invoiceRecord.payload);
+    emailText = plainTextInvoice(invoiceRecord.payload);
+  }
+
   // Reserve the customer's credit and persist the invoice together. This is
   // atomic, so two invoices cannot spend the same balance and a failed invoice
   // save cannot consume credit without leaving a record behind.
@@ -2073,8 +2110,8 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   const result = await sendEmail({
     to: recipientEmail,
     subject: `Invoice ${payload.invoiceNumber} from The Way It Fits`,
-    html,
-    text: plainTextInvoice(payload),
+    html: emailHtml,
+    text: emailText,
   });
 
   if (!result.success) {
