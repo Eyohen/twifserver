@@ -3228,7 +3228,7 @@ router.patch('/invoices/:invoiceNumber/order-sheet/archive', requireRole('owner'
 // new sheet. It is refused once Production have started on it or any fabric
 // has been released against it, since stock taken out is not put back by a
 // delete. An order-sheet-only record (no invoice behind it) goes entirely.
-router.delete('/invoices/:invoiceNumber/order-sheet', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+router.delete('/invoices/:invoiceNumber/order-sheet', requireRole('owner'), asyncHandler(async (req, res) => {
   // The checks and the removal happen on one locked row, so fabric released or
   // work started a moment earlier cannot slip past them.
   let outcome;
@@ -3238,7 +3238,7 @@ router.delete('/invoices/:invoiceNumber/order-sheet', requireRole('owner', 'admi
     const payload = invoice.payload || {};
     const sheet = payload.orderSheet;
     if (!sheet?.status) { const error = new Error('This invoice has no order sheet'); error.status = 404; throw error; }
-    if (sheet.status !== 'Order Sheet Confirmed') {
+    if (!['Order Sheet Confirmed', 'Assigned'].includes(sheet.status)) {
       const error = new Error(`This order sheet is already ${String(sheet.status).toLowerCase()} in production. Stop it there before deleting it.`);
       error.status = 409;
       throw error;
