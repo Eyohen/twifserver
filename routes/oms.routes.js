@@ -1889,6 +1889,16 @@ router.get('/invoices/sent', asyncHandler(async (req, res) => {
     const sheet = row.payload?.orderSheet;
     if (sheet?.status === 'Assigned' && nobodyAssigned(sheet)) {
       await row.update({ payload: { ...row.payload, orderSheet: { ...sheet, status: 'Order Sheet Confirmed' } } });
+      continue;
+    }
+    // Assignments made before the day was recorded are given the last date the
+    // sheet changed, once, so a later save cannot move them into a newer period.
+    if (Array.isArray(sheet?.items) && sheet.items.some((item) => (item.tailors || []).some((name) => !item.tailorAssignedAt?.[name]))) {
+      const when = sheet.updatedAt || (row.updatedAt ? new Date(row.updatedAt).toISOString() : new Date().toISOString());
+      const items = sheet.items.map((item) => ((item.tailors || []).some((name) => !item.tailorAssignedAt?.[name])
+        ? { ...item, tailorAssignedAt: { ...(item.tailorAssignedAt || {}), ...Object.fromEntries((item.tailors || []).filter((name) => !item.tailorAssignedAt?.[name]).map((name) => [name, when])) } }
+        : item));
+      await row.update({ payload: { ...row.payload, orderSheet: { ...sheet, items } } });
     }
   }
   const invoices = req.staff?.role === 'tailor'
@@ -3536,9 +3546,16 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
         return res.status(400).json({ success: false, message: `${invalid} is not an active tailor in this item's department` });
       }
     }
+    // The day each tailor was put on this garment, so workload can be read over
+    // a period. Kept for tailors who stay on it, dropped for those taken off.
+    const nowIso = new Date().toISOString();
+    const keptStamps = Object.fromEntries(Object.entries(items[index].tailorAssignedAt || {}).filter(([name]) => names.includes(name)));
+    const previouslyOnItem = new Set(items[index].tailors || []);
+    const tailorAssignedAt = Object.fromEntries(names.map((name) => [name, keptStamps[name] || (previouslyOnItem.has(name) ? null : nowIso)]).filter(([, at]) => at));
     items[index] = {
       ...items[index],
       tailors: names,
+      tailorAssignedAt,
       ...(entry.tailorDueDate !== undefined ? { tailorDueDate: entry.tailorDueDate } : {}),
       ...(Array.isArray(entry.fabrics) ? { fabrics: entry.fabrics } : {}),
     };
@@ -4437,6 +4454,9 @@ const DEFAULT_SETTINGS = {
   invoicePrefix: 'INV',
   invoiceValidityHours: 48,
   productionLeadTimeWeeks: 4,
+  // The most jobs one tailor is meant to carry. The Production overview shows
+  // each tailor's load against it. The Owner sets it.
+  tailorWorkloadMax: 5,
   collectionReminderDays: 7,
   lowStockThreshold: 5,
   currency: 'NGN',
@@ -4506,7 +4526,18 @@ router.put('/settings', requireRole('owner', 'admin'), asyncHandler(async (req, 
     next.paymentReleasePercent = Math.min(100, Math.max(0, Math.round(next.paymentReleasePercent)));
   }
 
+  // A whole number of jobs, at least one.
+  if ('tailorWorkloadMax' in next) {
+    next.tailorWorkloadMax = Math.min(1000, Math.max(1, Math.round(next.tailorWorkloadMax)));
+  }
+
   const current = await readSetting(SETTINGS_KEY, {});
+  // How many jobs a tailor may carry is the Owner's call. The settings page
+  // sends every value back on save, so only a change to it is refused here.
+  if ('tailorWorkloadMax' in next && req.staff?.role !== 'owner'
+      && next.tailorWorkloadMax !== Number(current.tailorWorkloadMax ?? DEFAULT_SETTINGS.tailorWorkloadMax)) {
+    return res.status(403).json({ success: false, message: 'Only the Owner can change the maximum workload for tailors' });
+  }
   const settings = { ...DEFAULT_SETTINGS, ...current, ...next };
   await writeSetting(SETTINGS_KEY, settings, 'oms');
   res.json({ success: true, data: { settings } });
