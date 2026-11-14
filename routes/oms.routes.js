@@ -2758,6 +2758,10 @@ const productionAssignmentChanged = (before, after) => (
   JSON.stringify(productionAssignmentSnapshot(before)) !== JSON.stringify(productionAssignmentSnapshot(after))
 );
 
+// Whether a tailor may mark a job Ready. The client has asked for this to rest
+// with the Production Manager for now.
+const TAILOR_MAY_MARK_READY = false;
+
 router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   const invoice = await findSentInvoiceByTrackingToken(req.params.token);
 
@@ -2793,12 +2797,20 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
   // other tailors' assignments, everything) as the request body, so without
   // this, anything sent under a tailor's session — not just what their own UI
   // sends — would be applied wholesale by the merge below.
-  const TAILOR_ALLOWED_STATUSES = ['In Progress', 'Ready'];
+  const TAILOR_ALLOWED_STATUSES = TAILOR_MAY_MARK_READY ? ['In Progress', 'Ready'] : ['In Progress'];
   const isTailorOnly = isAssignedTailor && !isPrivilegedEditor && !isProductionManager;
+  // Marking a job Ready is the Production Manager's. It is switched off here,
+  // not removed, so it can be given back to tailors by flipping the one flag.
+  if (isTailorOnly && req.body?.status === 'Ready' && !TAILOR_MAY_MARK_READY) {
+    return res.status(403).json({
+      success: false,
+      message: 'Only the Production Manager can mark a job as Ready',
+    });
+  }
   if (isTailorOnly && !TAILOR_ALLOWED_STATUSES.includes(req.body?.status)) {
     return res.status(400).json({
       success: false,
-      message: 'A tailor may only mark a job In Progress or Ready',
+      message: TAILOR_MAY_MARK_READY ? 'A tailor may only mark a job In Progress or Ready' : 'A tailor may only mark a job In Progress',
     });
   }
 
@@ -4608,6 +4620,47 @@ router.delete('/membership-tiers/:id', asyncHandler(async (req, res) => {
 
   await writeSetting(TIERS_KEY, tiers.filter((item) => item.id !== tier.id), 'oms');
   res.json({ success: true, message: 'Membership deleted.' });
+}));
+
+// How many jobs were finished in a period, counted across every invoice rather
+// than just the most recent hundred the lists carry. A job is dated by the day
+// Production marked it ready. Jobs finished before that day was recorded are
+// given the last date their sheet changed, once, and keep it from then on, so
+// a later save (scoring a tailor, say) cannot move them into a newer period.
+const FINISHED_SHEET_STATES = ['Ready', 'Ready for Collection', 'Completed'];
+router.get('/stats/completed-jobs', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const parse = (value) => { const at = new Date(String(value || '')); return Number.isNaN(at.getTime()) ? null : at; };
+  const windows = [['from', 'to'], ['prevFrom', 'prevTo']].map(([a, b]) => [parse(req.query[a]), parse(req.query[b])]);
+  if (!windows[0][0] || !windows[0][1]) return res.status(400).json({ success: false, message: 'A from and to date are needed' });
+
+  const unstamped = await SentInvoice.findAll({
+    where: {
+      [Op.and]: [
+        db.sequelize.literal(`("SentInvoice"."payload"->'orderSheet'->>'status') IN (${FINISHED_SHEET_STATES.map((state) => `'${state}'`).join(',')})`),
+        db.sequelize.literal(`("SentInvoice"."payload"->'orderSheet'->>'readyAt') IS NULL`),
+      ],
+    },
+  });
+  for (const row of unstamped) {
+    const sheet = row.payload.orderSheet;
+    const when = sheet.updatedAt || (row.updatedAt ? new Date(row.updatedAt).toISOString() : new Date().toISOString());
+    await row.update({ payload: { ...row.payload, orderSheet: { ...sheet, readyAt: when } } });
+  }
+
+  const countBetween = async (start, end) => {
+    if (!start || !end) return null;
+    const [rows] = await db.sequelize.query(
+      `SELECT COUNT(*)::int AS count FROM "SentInvoices"
+       WHERE ("payload"->'orderSheet'->>'status') IN (:states)
+         AND ("payload"->>'archivedAt') IS NULL
+         AND ("payload"->'orderSheet'->>'archivedAt') IS NULL
+         AND ("payload"->'orderSheet'->>'readyAt')::timestamptz >= :start
+         AND ("payload"->'orderSheet'->>'readyAt')::timestamptz <= :end`,
+      { replacements: { states: FINISHED_SHEET_STATES, start, end } }
+    );
+    return rows[0]?.count ?? 0;
+  };
+  res.json({ success: true, data: { count: await countBetween(...windows[0]), previous: await countBetween(...windows[1]) } });
 }));
 
 router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
