@@ -77,6 +77,27 @@ const buildRows = (items = [], showDiscountColumn = true) => items.map((item, in
   `;
 }).join('');
 
+// One row per payment, in the order they were made: the first is the initial
+// payment, every later one an additional payment. The date is the day the money
+// was received where that was recorded, otherwise the day it was entered. If
+// the invoice shows more paid than the recorded payments add up to — an invoice
+// from before each payment was kept — the difference is listed as one row, so
+// the rows always add up to what the total says.
+const buildPaymentRows = (payments = [], amountPaid = 0) => {
+  const entries = (Array.isArray(payments) ? payments : [])
+    .map((entry) => ({ amount: Number(entry?.amount) || 0, date: entry?.paidOn || entry?.recordedAt || null }))
+    .filter((entry) => entry.amount > 0);
+  const recorded = entries.reduce((sum, entry) => sum + entry.amount, 0);
+  const rows = [];
+  if (amountPaid - recorded > 0.005) rows.push({ label: 'Payment received', date: null, amount: Math.round((amountPaid - recorded) * 100) / 100 });
+  entries.forEach((entry, index) => rows.push({
+    label: rows.length === 0 && index === 0 ? 'Initial Payment' : 'Additional Payment',
+    date: entry.date,
+    amount: entry.amount,
+  }));
+  return rows;
+};
+
 const createTwifInvoiceHtml = ({
   store = 'lekki',
   invoiceNumber,
@@ -87,8 +108,16 @@ const createTwifInvoiceHtml = ({
   subtotal,
   eliteDiscountAmount = 0,
   storeCreditApplied = 0,
+  // A discount on the whole invoice, taken after the per-item ones. The amount
+  // is the figure in naira; the mode and percentage say how it was entered.
+  invoiceDiscountMode = 'percent',
+  invoiceDiscountPercent = 0,
+  invoiceDiscountAmount = 0,
   balanceDue,
   amountReceived = 0,
+  // Every payment recorded against the invoice, oldest first. Each keeps its own
+  // amount and date; they are listed one by one rather than as a single sum.
+  payments = [],
   paymentStatus = 'partial_paid',
   paymentMethod = 'transfer',
   trackingUrl,
@@ -115,8 +144,9 @@ const createTwifInvoiceHtml = ({
   // No line was ever discounted, so the column has nothing to show but a
   // column of dashes — leave it out of the table rather than print that.
   const showDiscountColumn = items.some((item) => Number(item.discountPercent ?? 0) > 0 || Number(item.discountAmount ?? 0) > 0);
+  const invoiceDiscount = Math.max(0, Number(invoiceDiscountAmount) || 0);
   const computedBalance = balanceDue ?? Math.max(
-    Number(computedSubtotal) - itemDiscountTotal - Number(eliteDiscountAmount) - Number(storeCreditApplied),
+    Number(computedSubtotal) - itemDiscountTotal - invoiceDiscount - Number(eliteDiscountAmount) - Number(storeCreditApplied),
     0
   );
   // `balanceDue` is what the invoice comes to, not what is left to pay — the
@@ -124,6 +154,7 @@ const createTwifInvoiceHtml = ({
   // Fully Paid printed "Balance Due 150,000" beside the Fully Paid badge.
   const amountPaid = Math.min(Math.max(Number(amountReceived) || 0, 0), computedBalance);
   const outstanding = Math.max(computedBalance - amountPaid, 0);
+  const paymentRows = buildPaymentRows(payments, amountPaid);
   const safeInvoiceNumber = escapeHtml(invoiceNumber || 'INV00000');
   const storeLabel = escapeHtml(storeDetails.label);
   const safePaymentStatus = escapeHtml(paymentStatusLabel(paymentStatus));
@@ -258,6 +289,12 @@ const createTwifInvoiceHtml = ({
                           <td style="padding:8px 0;text-align:right;color:#c2453a;font-weight:800;">-${formatNaira(itemDiscountTotal)}</td>
                         </tr>
                       ` : ''}
+                      ${invoiceDiscount > 0 ? `
+                        <tr>
+                          <td style="padding:8px 0;color:#555;">Invoice discount${invoiceDiscountMode === 'percent' && Number(invoiceDiscountPercent) > 0 ? ` (${Number(Number(invoiceDiscountPercent).toFixed(2))}%)` : ''}</td>
+                          <td style="padding:8px 0;text-align:right;color:#c2453a;font-weight:800;">-${formatNaira(invoiceDiscount)}</td>
+                        </tr>
+                      ` : ''}
                       ${Number(eliteDiscountAmount) > 0 ? `
                         <tr>
                           <td style="padding:8px 0;color:#9a7830;font-weight:800;">★ Elite Member Discount</td>
@@ -290,7 +327,39 @@ const createTwifInvoiceHtml = ({
                 </tr>
               </table>
 
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:34px;background:#171717;border-radius:7px;">
+              ${paymentRows.length ? `
+              <div data-keep-together="true" style="page-break-inside:avoid;break-inside:avoid;">
+              <h3 style="margin:34px 0 12px;color:#2a2a2a;font-size:16px;letter-spacing:.08em;text-transform:uppercase;">Payment Breakdown</h3>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+                <thead>
+                  <tr style="background:#171717;">
+                    <th align="left" style="padding:11px 14px;color:#ffffff;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Description</th>
+                    <th align="left" style="padding:11px 14px;color:#ffffff;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Date</th>
+                    <th align="right" style="padding:11px 14px;color:#ffffff;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${paymentRows.map((row, index) => `
+                  <tr>
+                    <td style="padding:12px 14px;border-bottom:1px solid #e5e5e5;color:#2a2a2a;font-size:14px;${index % 2 === 1 ? 'background:#f4f4f4;' : ''}">${escapeHtml(row.label)}</td>
+                    <td style="padding:12px 14px;border-bottom:1px solid #e5e5e5;color:#4a4a4a;font-size:14px;${index % 2 === 1 ? 'background:#f4f4f4;' : ''}">${row.date ? escapeHtml(formatDate(row.date)) : '—'}</td>
+                    <td style="padding:12px 14px;border-bottom:1px solid #e5e5e5;text-align:right;color:#2a2a2a;font-weight:800;font-size:14px;${index % 2 === 1 ? 'background:#f4f4f4;' : ''}">${formatNaira(row.amount)}</td>
+                  </tr>`).join('')}
+                  <tr>
+                    <td colspan="2" style="padding:12px 14px;color:#2a7d4f;font-weight:800;font-size:14px;">Total Paid</td>
+                    <td style="padding:12px 14px;text-align:right;color:#2a7d4f;font-weight:800;font-size:14px;">${formatNaira(amountPaid)}</td>
+                  </tr>
+                  <tr>
+                    <td colspan="2" style="padding:12px 14px;color:#2a2a2a;font-weight:800;font-size:14px;">Balance Due</td>
+                    <td style="padding:12px 14px;text-align:right;color:#2a2a2a;font-weight:800;font-size:14px;">${formatNaira(outstanding)}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p style="margin:12px 0 0;text-align:right;color:#555;font-size:13px;">Total Invoice Amount <strong style="margin-left:10px;color:#2a2a2a;font-size:16px;">${formatNaira(computedBalance)}</strong></p>
+              </div>
+              ` : ''}
+
+              <table data-keep-together="true" role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:34px;background:#171717;border-radius:7px;">
                 <tr>
                   <td style="padding:22px 24px;color:#d8d8d8;">
                     <h3 style="margin:0 0 10px;color:#d3ab4f;font-size:14px;letter-spacing:.16em;text-transform:uppercase;">Track Your Order Online</h3>

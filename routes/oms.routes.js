@@ -592,6 +592,15 @@ const trackingTokenFromUrl = (value = '') => {
 
 const trackingUrlForToken = (token) => `${trackingBaseUrl()}/c/${token}`;
 
+// The payments a document is drawn from, reduced to what it shows.
+const documentPayments = (list) => (Array.isArray(list) ? list : [])
+  .map((entry) => ({
+    amount: Number(entry?.amount) || 0,
+    paidOn: entry?.paidOn ? String(entry.paidOn).slice(0, 32) : null,
+    recordedAt: entry?.recordedAt ? String(entry.recordedAt).slice(0, 40) : null,
+  }))
+  .filter((entry) => entry.amount > 0);
+
 const buildInvoiceHtmlPayload = (body = {}) => {
   const token = body.trackingToken || trackingTokenFromUrl(body.trackingUrl) || trackingToken();
 
@@ -605,6 +614,15 @@ const buildInvoiceHtmlPayload = (body = {}) => {
     subtotal: body.subtotal,
     eliteDiscountAmount: body.eliteDiscountAmount || 0,
     storeCreditApplied: body.storeCreditApplied || 0,
+    // A discount on the whole invoice, on top of any per-item ones. The amount
+    // is the naira figure it comes to; the mode and percentage say how it was
+    // entered, so it reads back the way it was typed.
+    invoiceDiscountMode: body.invoiceDiscountMode === 'amount' ? 'amount' : 'percent',
+    invoiceDiscountPercent: Math.min(100, Math.max(0, Number(body.invoiceDiscountPercent) || 0)),
+    invoiceDiscountAmount: Math.max(0, Number(body.invoiceDiscountAmount) || 0),
+    // Only used to draw a document (a preview, or a download of an invoice that
+    // already exists). What is stored is built on the server, never taken from here.
+    payments: documentPayments(body.payments),
     balanceDue: body.balanceDue,
     // What the customer has already handed over. Without it the invoice prints
     // the whole sum as outstanding even when it is marked Fully Paid.
@@ -767,6 +785,9 @@ const formatSentInvoice = (invoice) => {
     subtotal: Number(payload.subtotal || 0),
     eliteDiscountAmount: Number(payload.eliteDiscountAmount || 0),
     storeCreditApplied: Number(payload.storeCreditApplied || 0),
+    invoiceDiscountMode: payload.invoiceDiscountMode === 'amount' ? 'amount' : 'percent',
+    invoiceDiscountPercent: Number(payload.invoiceDiscountPercent || 0),
+    invoiceDiscountAmount: Number(payload.invoiceDiscountAmount || 0),
     balanceDue: Number(payload.balanceDue ?? invoice.total ?? 0),
     paid: payload.paid ?? payload.amountPaid ?? payload.amountReceived ?? payload.paymentAmount ?? null,
     paymentHistory: Array.isArray(payload.paymentHistory) ? payload.paymentHistory : [],
@@ -1986,6 +2007,19 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     });
   }
 
+  // A discount on the whole invoice cannot be larger than what is left once the
+  // per-item discounts are taken off — the invoice never goes below nothing.
+  const grossOfLines = payload.items.reduce((sum, item) => sum + (Number(item.rate ?? item.unitPrice ?? 0) * Number(item.quantity ?? item.qty ?? 1)), 0);
+  const itemDiscountsOnLines = payload.items.reduce((sum, item) => {
+    const gross = Number(item.rate ?? item.unitPrice ?? 0) * Number(item.quantity ?? item.qty ?? 1);
+    const flat = Number(item.discountAmount ?? 0);
+    const percent = Number(item.discountPercent ?? 0);
+    return sum + (item.discountMode === 'amount' ? flat : (percent ? (gross * percent) / 100 : flat));
+  }, 0);
+  if (payload.invoiceDiscountAmount > Math.max(0, grossOfLines - itemDiscountsOnLines) + 0.01) {
+    return res.status(400).json({ success: false, message: 'The invoice discount cannot be more than the invoice comes to' });
+  }
+
   // A figure larger than the invoice is a mistake, not a credit.
   const payableTotal = Number(payload.balanceDue || 0);
   const requestedAmount = Number(req.body.amountReceived ?? payload.amountReceived ?? 0);
@@ -2053,7 +2087,36 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     payload.storeCreditBalanceBefore = existingInvoice.payload.storeCreditBalanceBefore;
   }
 
-  const html = createTwifInvoiceHtml(payload);
+  // The payments recorded against this invoice, kept one by one. A new invoice
+  // starts with its initial payment. An invoice that already exists keeps what
+  // it has: payments added since cannot be known to the form that is sending
+  // this, and must not be folded into one figure or have their dates reset.
+  const existingLedger = existingInvoice?.payload || {};
+  const priorHistory = Array.isArray(existingLedger.paymentHistory) ? existingLedger.paymentHistory : [];
+  const initialPayment = amountAtCreation > 0 ? {
+    amount: amountAtCreation,
+    method: payload.paymentMethod || 'Unspecified',
+    note: 'Recorded when the invoice was raised',
+    recordedBy: req.staff?.displayName || req.body.createdByName || 'Store Manager',
+    recordedAt: new Date().toISOString(),
+  } : null;
+  let ledger;
+  if (existingInvoice && priorHistory.length > 1) {
+    ledger = { paid: Number(existingLedger.paid ?? amountAtCreation), history: priorHistory, evidence: existingLedger.paymentEvidence };
+  } else if (existingInvoice && priorHistory.length === 1 && Number(priorHistory[0].amount) === amountAtCreation) {
+    ledger = { paid: amountAtCreation, history: priorHistory, evidence: undefined };
+  } else if (existingInvoice && Number(existingLedger.paid || 0) > 0 && !priorHistory.length) {
+    // Paid before individual payments were kept: no date is known, and none is
+    // invented. The document lists it as one undated payment.
+    ledger = { paid: amountAtCreation, history: [], evidence: undefined };
+  } else {
+    ledger = { paid: amountAtCreation, history: initialPayment ? [initialPayment] : [], evidence: undefined };
+  }
+  payload.amountReceived = ledger.paid;
+
+  // `payments` is only for drawing a document; it is not part of the record.
+  const { payments: _drawn, ...storablePayload } = payload;
+  const html = createTwifInvoiceHtml({ ...payload, amountReceived: ledger.paid, payments: ledger.history });
   const invoiceRecord = {
     invoiceNumber: payload.invoiceNumber,
     store: normalizeStoreKey(payload.store),
@@ -2070,23 +2133,16 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     emailStatus: 'failed',
     orderStatus: paymentStatusLabel(payload.paymentStatus),
     payload: {
-      ...payload,
+      ...storablePayload,
       recipientEmail,
       accountApprovalStatus: 'Pending Accounts',
       // What the customer handed over as the invoice was raised. It used to be
       // possible to mark an invoice part paid and record no figure at all,
       // which left Accounts nothing to reconcile and production nothing to
       // gate on.
-      paid: amountAtCreation,
-      ...(amountAtCreation > 0 ? {
-        paymentHistory: [{
-          amount: amountAtCreation,
-          method: payload.paymentMethod || 'Unspecified',
-          note: 'Recorded when the invoice was raised',
-          recordedBy: req.staff?.displayName || req.body.createdByName || 'Store Manager',
-          recordedAt: new Date().toISOString(),
-        }],
-      } : {}),
+      paid: ledger.paid,
+      ...(ledger.history.length ? { paymentHistory: ledger.history } : {}),
+      ...(ledger.evidence ? { paymentEvidence: ledger.evidence } : {}),
     },
   };
 
@@ -2127,7 +2183,7 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
     }
   }
   let emailHtml = html;
-  let emailText = plainTextInvoice(payload);
+  let emailText = plainTextInvoice({ ...payload, amountReceived: ledger.paid });
   if (recordHasMovedOn) {
     Object.assign(invoiceRecord, {
       store: existingInvoice.store,
@@ -2142,8 +2198,10 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
       customerEmail: recipientEmail || existingInvoice.customerEmail,
       payload: { ...existingState, recipientEmail: recipientEmail || existingState.recipientEmail },
     });
-    emailHtml = createTwifInvoiceHtml(invoiceRecord.payload);
-    emailText = plainTextInvoice(invoiceRecord.payload);
+    // Drawn from what is on file, so a payment added since is on the document.
+    const onFile = { ...invoiceRecord.payload, amountReceived: invoiceRecord.payload.paid ?? invoiceRecord.payload.amountReceived ?? 0 };
+    emailHtml = createTwifInvoiceHtml({ ...onFile, payments: invoiceRecord.payload.paymentHistory });
+    emailText = plainTextInvoice(onFile);
   }
 
   // Reserve the customer's credit and persist the invoice together. This is
@@ -2395,6 +2453,21 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
     });
   }
 
+  // The day the money actually arrived, where the person recording it says so.
+  // It cannot be in the future; left out, the day it is entered stands in.
+  let paidOn = null;
+  if (req.body?.paymentDate !== undefined && req.body?.paymentDate !== null && String(req.body.paymentDate).trim() !== '') {
+    const typed = String(req.body.paymentDate).trim().slice(0, 10);
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(typed) ? new Date(`${typed}T12:00:00Z`) : null;
+    if (!day || Number.isNaN(day.getTime())) {
+      return res.status(400).json({ success: false, message: 'Enter the payment date as a valid date' });
+    }
+    if (typed > new Date().toISOString().slice(0, 10)) {
+      return res.status(400).json({ success: false, message: 'The payment date cannot be in the future' });
+    }
+    paidOn = typed;
+  }
+
   const totalPaid = alreadyPaid + amount;
   const paymentStatus = totalPaid <= 0 ? 'unpaid' : totalPaid >= payable ? 'fully_paid' : 'partial_paid';
   const method = String(req.body?.method || payload.paymentMethod || 'transfer');
@@ -2434,6 +2507,7 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
       evidenceCount: newEvidence.length,
       recordedBy: req.staff.displayName,
       recordedAt: new Date().toISOString(),
+      ...(paidOn ? { paidOn } : {}),
     },
   ];
 
@@ -3117,7 +3191,21 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
   const itemDiscountTotal = nextItems.reduce((sum, line) => sum + (line.discountAmount ?? 0), 0);
   const eliteDiscountAmount = Number(payload.eliteDiscountAmount || 0);
   const storeCreditApplied = Number(payload.storeCreditApplied || 0);
-  const nextTotal = Math.max(0, subtotal - itemDiscountTotal - eliteDiscountAmount - storeCreditApplied);
+  // A discount on the whole invoice comes off after the item discounts. It
+  // keeps the unit it was entered in, and is worked out again from the lines
+  // as they now stand, so editing a line cannot leave it stale. It can never
+  // take the invoice below nothing.
+  const afterItemDiscounts = Math.max(0, subtotal - itemDiscountTotal);
+  const nextInvoiceDiscountMode = (req.body.invoiceDiscountMode ?? payload.invoiceDiscountMode) === 'amount' ? 'amount' : 'percent';
+  const typedInvoicePercent = Math.min(100, Math.max(0, Number(req.body.invoiceDiscountPercent ?? payload.invoiceDiscountPercent ?? 0) || 0));
+  const typedInvoiceFigure = Math.max(0, Number(req.body.invoiceDiscountAmount ?? payload.invoiceDiscountAmount ?? 0) || 0);
+  const invoiceDiscountAmount = round2(nextInvoiceDiscountMode === 'amount'
+    ? Math.min(typedInvoiceFigure, afterItemDiscounts)
+    : (afterItemDiscounts * typedInvoicePercent) / 100);
+  const invoiceDiscountPercent = nextInvoiceDiscountMode === 'amount'
+    ? (afterItemDiscounts > 0 ? Math.round((invoiceDiscountAmount / afterItemDiscounts) * 1000000) / 10000 : 0)
+    : typedInvoicePercent;
+  const nextTotal = Math.max(0, afterItemDiscounts - invoiceDiscountAmount - eliteDiscountAmount - storeCreditApplied);
 
   // An invoice cannot be quietly re-priced to less than what has already been
   // handed over against it — that would leave a payment with nothing behind it.
@@ -3133,6 +3221,9 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
     ...payload,
     items: nextItems,
     subtotal,
+    invoiceDiscountMode: nextInvoiceDiscountMode,
+    invoiceDiscountPercent,
+    invoiceDiscountAmount,
     balanceDue: nextTotal,
     ...(notes !== undefined ? { notes } : {}),
     ...(dueDate !== undefined ? { dueDate } : {}),
