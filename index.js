@@ -178,6 +178,16 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
+  // The body parser's own refusal. It used to fall through to a generic 500
+  // that carried the parser's wording, which tells a store manager nothing about
+  // what to do — attached pictures are what make a request this big.
+  if (err.type === 'entity.too.large' || err.status === 413) {
+    return res.status(413).json({
+      success: false,
+      message: 'That is too much to send in one go — the attached pictures are too large. Remove one or choose smaller images, then try again.',
+    });
+  }
+
   console.error('Error:', err);
 
   if (err.name === 'SequelizeValidationError') {

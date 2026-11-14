@@ -48,8 +48,13 @@ const paymentMethodLabel = (value = '') => (
 const buildRows = (items = [], showDiscountColumn = true) => items.map((item, index) => {
   const rate = Number(item.rate ?? item.unitPrice ?? 0);
   const quantity = Number(item.quantity ?? item.qty ?? 1);
-  const discount = Number(item.discountAmount ?? 0);
   const discountPercent = Number(item.discountPercent ?? 0);
+  // A discount entered as a naira figure is shown as that figure. It used to be
+  // stored only as a percentage worked out from it, and printed as one.
+  const inFigures = item.discountMode === 'amount';
+  const discount = inFigures
+    ? Number(item.discountAmount ?? 0)
+    : (Number(item.discountAmount) || (rate * quantity * discountPercent) / 100);
   const amount = Number(item.amount ?? (rate * quantity) - discount);
   const hasFullDiscount = discountPercent >= 100;
   const stripe = index % 2 === 1 ? 'background:#f4f4f4;' : '';
@@ -64,7 +69,7 @@ const buildRows = (items = [], showDiscountColumn = true) => items.map((item, in
       <td style="padding:16px 14px;text-align:center;color:#4a4a4a;${stripe}">${quantity}</td>
       ${showDiscountColumn ? `
       <td style="padding:16px 14px;text-align:center;${stripe}">
-        ${discountPercent ? `<span style="display:inline-block;background:#f7dede;color:#c2453a;border-radius:999px;padding:4px 10px;font-size:11px;font-weight:800;">${discountPercent}%</span>` : '<span style="color:#777;">—</span>'}
+        ${(inFigures ? discount : discountPercent) ? `<span style="display:inline-block;background:#f7dede;color:#c2453a;border-radius:999px;padding:4px 10px;font-size:11px;font-weight:800;">${inFigures ? `-${formatNaira(discount)}` : `${Number(discountPercent.toFixed(2))}%`}</span>` : '<span style="color:#777;">—</span>'}
       </td>
       ` : ''}
       <td style="padding:16px 14px;text-align:right;color:#2a2a2a;font-weight:800;${stripe}">${formatNaira(amount)}</td>
@@ -103,6 +108,8 @@ const createTwifInvoiceHtml = ({
     const quantity = Number(item.quantity ?? item.qty ?? 1);
     const percent = Number(item.discountPercent ?? 0);
     const flat = Number(item.discountAmount ?? 0);
+    // A figure is exact; a percentage is worked out from the line.
+    if (item.discountMode === 'amount') return sum + flat;
     return sum + (percent ? (rate * quantity * percent) / 100 : flat);
   }, 0);
   // No line was ever discounted, so the column has nothing to show but a
@@ -185,7 +192,7 @@ const createTwifInvoiceHtml = ({
                     <div style="margin-top:10px;text-align:right;">
                       <span style="display:inline-block;border:1px solid #d9b45a;border-radius:999px;background:#fff9e8;color:#8a6419;padding:6px 12px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;">${safePaymentStatus}</span>
                     </div>
-                    <div style="margin-top:8px;color:#777;font-size:12px;font-weight:800;text-align:right;">Payment method: ${safePaymentMethod}</div>
+                    <div style="margin-top:8px;color:#777;font-size:12px;font-weight:800;text-align:right;">Payment method: ${safePaymentMethod || 'None needed'}</div>
                   </td>
                 </tr>
               </table>

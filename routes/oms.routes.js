@@ -620,13 +620,20 @@ const buildInvoiceHtmlPayload = (body = {}) => {
   };
 };
 
+// An invoice that comes to nothing — every line discounted away, or covered by
+// store credit — owes nothing, so it is fully paid by definition and has no
+// payment to record: no method to choose and no receipt to attach.
+const invoiceComesToNothing = (payload) => payload.items.length > 0
+  && payload.balanceDue !== undefined && payload.balanceDue !== null && payload.balanceDue !== ''
+  && Number.isFinite(Number(payload.balanceDue)) && Number(payload.balanceDue) <= 0;
+
 const plainTextInvoice = (payload) => {
   const lines = [
     `Invoice ${payload.invoiceNumber}`,
     `Store: ${getTwifStoreDetails(payload.store).label}`,
     `Customer: ${payload.customer?.name || payload.customer?.fullName || 'Customer'}`,
     `Payment status: ${payload.paymentStatus === 'fully_paid' ? 'Fully Paid' : payload.paymentStatus === 'unpaid' ? 'Unpaid' : 'Partial Paid'}`,
-    `Payment method: ${paymentMethodLabel(payload.paymentMethod)}`,
+    `Payment method: ${payload.paymentMethod ? paymentMethodLabel(payload.paymentMethod) : 'None needed'}`,
     // Outstanding, not the invoice total: this line told a customer who had
     // paid in full that the whole amount was still due.
     ...(() => {
@@ -1730,6 +1737,11 @@ router.patch('/customers/:id', asyncHandler(async (req, res) => {
 }));
 
 router.delete('/customers/:id', asyncHandler(async (req, res) => {
+  // Archiving takes a customer off every list. The button is only shown to the
+  // Owner, and the server holds the same line.
+  if (req.staff?.role !== 'owner') {
+    return res.status(403).json({ success: false, message: 'Only the Owner can archive a customer profile.' });
+  }
   if (String(req.params.id).startsWith('sent-')) return res.status(409).json({ success: false, message: 'Invoice-only customers cannot be archived.' });
   const customer = await Customer.findByPk(req.params.id);
   if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
@@ -1773,9 +1785,11 @@ router.post('/invoices', asyncHandler(async (req, res) => {
 
 router.post('/invoices/html-preview', (req, res) => {
   const payload = buildInvoiceHtmlPayload(req.body);
+  const zeroTotal = invoiceComesToNothing(payload);
+  if (zeroTotal) payload.paymentStatus = 'fully_paid';
   const paymentStatus = normalisedPaymentStatus(payload.paymentStatus);
   const validPaymentMethods = ['transfer', 'card', 'pos', 'check', 'cash'];
-  if (paymentStatus !== 'unpaid' && !validPaymentMethods.includes(req.body.paymentMethod)) {
+  if (!zeroTotal && paymentStatus !== 'unpaid' && !validPaymentMethods.includes(req.body.paymentMethod)) {
     return res.status(400).json({
       success: false,
       message: 'Select a payment method for a partially or fully paid invoice',
@@ -1907,9 +1921,11 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   }
 
   const payload = buildInvoiceHtmlPayload(req.body);
+  const zeroTotal = invoiceComesToNothing(payload);
+  if (zeroTotal) payload.paymentStatus = 'fully_paid';
   const paymentStatus = normalisedPaymentStatus(payload.paymentStatus);
   const validPaymentMethods = ['transfer', 'card', 'pos', 'check', 'cash'];
-  if (paymentStatus !== 'unpaid' && !validPaymentMethods.includes(req.body.paymentMethod)) {
+  if (!zeroTotal && paymentStatus !== 'unpaid' && !validPaymentMethods.includes(req.body.paymentMethod)) {
     return res.status(400).json({
       success: false,
       message: 'Select a payment method for a partially or fully paid invoice',
@@ -1975,6 +1991,18 @@ router.post('/invoices/send-email', asyncHandler(async (req, res) => {
   }
 
   const existingInvoice = await SentInvoice.findOne({ where: { invoiceNumber: payload.invoiceNumber } });
+  // A new invoice that records any payment carries the receipt for it. The form
+  // asks for one, but a form is only a request: a store manager whose browser
+  // was still running an older copy of the page could save without it, so the
+  // server holds the same line. A re-send of an invoice that already exists
+  // keeps the receipts it has, and an invoice that owes nothing has no payment.
+  if (!existingInvoice && !zeroTotal && (paymentStatus !== 'unpaid' || amountAtCreation > 0)
+      && !payload.paymentEvidence.some((item) => item && safeImageDataUrl(item.dataUrl))) {
+    return res.status(400).json({
+      success: false,
+      message: 'Attach a receipt screenshot or payment photo for the payment on this invoice.',
+    });
+  }
   const existingCredit = Number(existingInvoice?.payload?.storeCreditApplied || 0);
   if (existingInvoice && existingCredit !== requestedStoreCredit) {
     return res.status(409).json({ success: false, message: 'Store credit cannot be changed after an invoice has been created.' });
@@ -2545,11 +2573,15 @@ router.post('/tracking/order-sheet', asyncHandler(async (req, res) => {
     orderStatus: customerTrackingStatus(nextPayload.orderSheet.status),
   });
 
-  await notifyRoles(
-    ['owner', 'admin', 'accounts'],
-    `${invoice.invoiceNumber} has a new order sheet and is waiting for Accounts approval.`,
-    { invoiceNumber: invoice.invoiceNumber, event: 'order_sheet_created' }
-  );
+  // An order sheet raised without an invoice needs nobody's approval, so it is
+  // not announced as waiting for Accounts.
+  if (!payload.orderSheetOnly) {
+    await notifyRoles(
+      ['owner', 'admin', 'accounts'],
+      `${invoice.invoiceNumber} has a new order sheet and is waiting for Accounts approval.`,
+      { invoiceNumber: invoice.invoiceNumber, event: 'order_sheet_created' }
+    );
+  }
   await notifyRoles(
     ['production_manager'],
     `A new order sheet was released for ${invoice.customerName} (${invoice.invoiceNumber}).`,
@@ -2823,6 +2855,20 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
     updatedAt: new Date().toISOString(),
   };
 
+  // The day an order was marked ready is what the store works the collection
+  // list from. It is stamped when the sheet first becomes ready, and a later
+  // save (which echoes the whole sheet back) can neither move nor erase it.
+  const READY_STATES = ['Ready', 'Ready for Collection'];
+  if (READY_STATES.includes(nextOrderSheet.status)) {
+    if (READY_STATES.includes(previousOrderSheet.status) && previousOrderSheet.readyAt) {
+      nextOrderSheet.readyAt = previousOrderSheet.readyAt;
+      nextOrderSheet.readyBy = previousOrderSheet.readyBy;
+    } else {
+      nextOrderSheet.readyAt = nextOrderSheet.updatedAt;
+      nextOrderSheet.readyBy = req.staff?.displayName || null;
+    }
+  }
+
   // Assigning a tailor, starting work or marking a garment ready are all ways
   // of putting a job into production, so each is refused while the order is
   // held. Everything else about the sheet can still be edited.
@@ -2985,16 +3031,32 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
   const nextEvidence = [...keptEvidence, ...newEvidence];
 
   const existingItems = payload.items || [];
+  // A line keeps the unit its discount was entered in. A naira figure is taken
+  // exactly as given and a percentage is worked out from the line, so editing an
+  // invoice cannot turn a figure into a rounded percentage. The line's amount is
+  // rewritten with it: it used to keep whatever it was when first sent, so an
+  // edited rate printed beside a stale amount.
+  const round2 = (value) => Math.round(value * 100) / 100;
   const nextItems = Array.isArray(items)
     ? items.map((line, index) => {
       const original = existingItems[index] || {};
+      const rate = Math.max(0, Number(line.rate ?? original.rate ?? 0));
+      const quantity = Math.max(0, Number(line.quantity ?? original.quantity ?? 1));
+      const gross = rate * quantity;
+      const mode = (line.discountMode ?? original.discountMode) === 'amount' ? 'amount' : 'percent';
+      const typedPercent = Math.min(100, Math.max(0, Number(line.discountPercent ?? original.discountPercent ?? 0)));
+      const typedFigure = Math.min(gross, Math.max(0, Number(line.discountAmount ?? original.discountAmount ?? 0)));
+      const discount = round2(mode === 'amount' ? typedFigure : (gross * typedPercent) / 100);
       return {
         ...original,
         description: String(line.description ?? original.description ?? '').trim(),
         note: line.note !== undefined ? line.note : original.note,
-        quantity: Math.max(0, Number(line.quantity ?? original.quantity ?? 1)),
-        rate: Math.max(0, Number(line.rate ?? original.rate ?? 0)),
-        discountPercent: Math.min(100, Math.max(0, Number(line.discountPercent ?? original.discountPercent ?? 0))),
+        quantity,
+        rate,
+        discountMode: mode,
+        discountPercent: mode === 'amount' ? (gross > 0 ? Math.round((discount / gross) * 1000000) / 10000 : 0) : typedPercent,
+        discountAmount: discount,
+        amount: round2(Math.max(gross - discount, 0)),
       };
     })
     : existingItems;
@@ -3011,7 +3073,7 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
   // items. The elite discount and store credit are not being edited here, so
   // they carry forward unchanged.
   const subtotal = nextItems.reduce((sum, line) => sum + (line.rate * line.quantity), 0);
-  const itemDiscountTotal = nextItems.reduce((sum, line) => sum + ((line.rate * line.quantity * line.discountPercent) / 100), 0);
+  const itemDiscountTotal = nextItems.reduce((sum, line) => sum + (line.discountAmount ?? 0), 0);
   const eliteDiscountAmount = Number(payload.eliteDiscountAmount || 0);
   const storeCreditApplied = Number(payload.storeCreditApplied || 0);
   const nextTotal = Math.max(0, subtotal - itemDiscountTotal - eliteDiscountAmount - storeCreditApplied);
@@ -3044,12 +3106,28 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
     editedAt: new Date().toISOString(),
   };
 
+  // Re-pricing an invoice can change what "paid" means for it: raising the
+  // total past what has been received leaves a balance, and an invoice that now
+  // comes to nothing owes nothing. The status followed the old total before,
+  // so an edited invoice could read Fully Paid with money still owing. It is
+  // only recomputed when the total moved and a received figure exists to
+  // measure against, so older invoices with no figure are left as they were.
+  let nextPaymentStatus = invoice.paymentStatus;
+  const paidIsRecorded = payload.paid !== undefined && payload.paid !== null && payload.paid !== '';
+  if (nextTotal !== Number(invoice.total)) {
+    if (nextTotal <= 0) nextPaymentStatus = 'fully_paid';
+    else if (paidIsRecorded) {
+      nextPaymentStatus = alreadyPaid <= 0 ? 'unpaid' : alreadyPaid >= nextTotal ? 'fully_paid' : 'partial_paid';
+    }
+  }
+
   await invoice.update({
     ...(customerName ? { customerName } : {}),
     ...(customerPhone !== undefined ? { customerPhone } : {}),
     ...(customerEmail ? { customerEmail } : {}),
     ...(store ? { store: normalizeStoreKey(store) } : {}),
     total: nextTotal,
+    ...(nextPaymentStatus !== invoice.paymentStatus ? { paymentStatus: nextPaymentStatus } : {}),
     payload: nextPayload,
   });
 
@@ -3174,6 +3252,76 @@ const saveOrderSheet = async (invoice, orderSheet) => {
   await invoice.update({ payload: { ...payload, orderSheet } });
   return orderSheet;
 };
+
+// The Inventory Officer is the one who releases fabric to Production, so they
+// choose which fabric (and how much) each garment takes as well as releasing it.
+// Only the selection is written here; stock moves in /fabrics/allocate. A
+// garment whose fabric has already been released is left as it is, and nothing
+// changes once the order is completed.
+router.patch('/jobs/:invoiceNumber/fabrics', requireRole('inventory_manager', 'production_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Order not found' });
+  const sheet = orderSheetOf(invoice);
+  if (!sheet?.status) return res.status(404).json({ success: false, message: 'This order has no order sheet yet' });
+  if (PRODUCTION_ASSIGNMENT_LOCKED_STATUSES.has(sheet.status)) {
+    return res.status(409).json({ success: false, message: 'Fabric is locked once the order is completed' });
+  }
+  const items = Array.isArray(sheet.items) && sheet.items.length ? [...sheet.items] : null;
+  if (!items) return res.status(409).json({ success: false, message: 'This order has no garments to assign fabric to' });
+
+  const requested = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!requested.length) return res.status(400).json({ success: false, message: 'Say which garment the fabric is for' });
+  const knownFabrics = new Map((await Fabric.findAll({ attributes: ['id', 'name', 'unit'] })).map((fabric) => [String(fabric.id), fabric]));
+
+  for (const entry of requested) {
+    const index = Number(entry.index);
+    if (!Number.isInteger(index) || index < 0 || index >= items.length) {
+      return res.status(400).json({ success: false, message: `There is no item ${index + 1} on this order` });
+    }
+    if (items[index].fabricAllocated) {
+      return res.status(409).json({ success: false, message: `Fabric has already been released for ${items[index].item || `item ${index + 1}`}` });
+    }
+    const lines = Array.isArray(entry.fabrics) ? entry.fabrics : [];
+    const clean = [];
+    for (const line of lines) {
+      if (line?.clientSupplied) {
+        clean.push({ clientSupplied: true, name: 'Client supplied', ...(line.departmentKey ? { departmentKey: String(line.departmentKey) } : {}) });
+        continue;
+      }
+      const fabric = knownFabrics.get(String(line?.fabricId));
+      const quantity = Number(line?.quantity);
+      if (!fabric) return res.status(400).json({ success: false, message: 'One of those fabrics is not in the inventory' });
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        return res.status(400).json({ success: false, message: `Say how much ${fabric.name} is needed` });
+      }
+      clean.push({
+        fabricId: fabric.id,
+        name: fabric.name,
+        unit: fabric.unit,
+        quantity: inventoryDecimal(quantity),
+        ...(line.departmentKey ? { departmentKey: String(line.departmentKey) } : {}),
+      });
+    }
+    const [first] = clean;
+    items[index] = {
+      ...items[index],
+      fabrics: clean,
+      fabric: first?.clientSupplied ? 'Client supplied' : first?.name || '',
+      fabricId: first?.fabricId || '',
+      fabricUnit: first?.unit || '',
+      fabricUsage: first?.quantity || '',
+    };
+  }
+
+  const nextSheet = {
+    ...sheet,
+    items,
+    fabrics: items.flatMap((item) => item.fabrics || []),
+    updatedAt: new Date().toISOString(),
+  };
+  await saveOrderSheet(invoice, nextSheet);
+  res.json({ success: true, data: { orderSheet: nextSheet } });
+}));
 
 router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
@@ -3419,6 +3567,77 @@ router.post('/jobs/:invoiceNumber/comments', asyncHandler(async (req, res) => {
   }
 
   res.status(201).json({ success: true, data: { comment } });
+}));
+
+// An Owner or Admin can raise an order sheet for a customer without an invoice
+// first. An order sheet lives on an invoice record, so this opens a bare one:
+// no lines, nothing to pay, already signed off by the person who raised it, and
+// numbered OS… so it is never mistaken for a customer invoice. The sheet is
+// then filled in and saved through the ordinary order-sheet route, and Production
+// sees it the same way as any other order.
+router.post('/order-sheets/without-invoice', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
+  const customer = req.body?.customerId ? await Customer.findByPk(req.body.customerId) : null;
+  if (!customer) return res.status(404).json({ success: false, message: 'Choose an existing customer to start from.' });
+  if (String(customer.category || '').toLowerCase() === 'archived') {
+    return res.status(409).json({ success: false, message: `${customer.fullName} is archived. Restore the profile before raising an order for them.` });
+  }
+
+  const activeKeys = storeKeys({ activeOnly: true });
+  const requested = normalizeStoreKey(req.body?.store || customer.measurements?.profile?.preferredStore || '');
+  const store = activeKeys.includes(requested) ? requested : activeKeys[0];
+  if (!store) return res.status(409).json({ success: false, message: 'There is no active store to raise this order for.' });
+
+  let number = '';
+  for (let attempt = 0; attempt < 5 && !number; attempt += 1) {
+    const candidate = `OS${String(Math.floor(Math.random() * 9000000) + 1000000)}`;
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await SentInvoice.findOne({ where: { invoiceNumber: candidate }, attributes: ['id'] }))) number = candidate;
+  }
+  if (!number) return res.status(500).json({ success: false, message: 'A number for this order could not be created. Try again.' });
+
+  const token = trackingToken();
+  const now = new Date().toISOString();
+  const record = await SentInvoice.create({
+    invoiceNumber: number,
+    store,
+    customerId: customer.id,
+    customerName: customer.fullName,
+    customerEmail: customer.email || '',
+    customerPhone: customer.phone || '',
+    createdByStaffId: req.staff?.id || null,
+    createdByName: req.staff?.displayName || 'Owner',
+    total: 0,
+    paymentStatus: 'fully_paid',
+    emailStatus: 'failed',
+    orderStatus: 'Fully Paid',
+    payload: {
+      invoiceNumber: number,
+      store,
+      customer: { name: customer.fullName, phone: customer.phone || '', email: customer.email || '', id: customer.id },
+      items: [],
+      subtotal: 0,
+      eliteDiscountAmount: 0,
+      storeCreditApplied: 0,
+      balanceDue: 0,
+      paid: 0,
+      paymentStatus: 'fully_paid',
+      paymentMethod: '',
+      invoiceDate: now,
+      dueDate: now,
+      notes: [],
+      trackingToken: token,
+      trackingUrl: trackingUrlForToken(token),
+      // Marks the record as an order sheet raised without an invoice, so it can
+      // be told apart from a customer invoice and is not chased for payment.
+      orderSheetOnly: true,
+      accountApprovalStatus: 'Approved',
+      accountApprovalNote: `Raised by ${req.staff?.displayName || 'the Owner'} without an invoice.`,
+      accountApprovedAt: now,
+      accountApprovedBy: req.staff?.displayName || 'Owner',
+    },
+  });
+
+  res.status(201).json({ success: true, data: { invoice: invoiceForStaff(record, req.staff) } });
 }));
 
 router.post('/order-sheets', asyncHandler(async (req, res) => {
@@ -3741,7 +3960,7 @@ router.patch('/inventory-edit-requests/:id/review', requireRole('owner', 'admin'
 // A garment can take more than one fabric — a shell and a lining, or two
 // colours — so an order sheet carries a list, each with its own quantity. One
 // fabric still works: it arrives as a list of one.
-router.post('/fabrics/allocate', requireRole('production_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
+router.post('/fabrics/allocate', requireRole('production_manager', 'inventory_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const { trackingToken: token, tailorName } = req.body;
   // Which garment this allocation is for. Undefined/null means the whole
   // job — the only option before fabric was tracked per item, and still how
@@ -4358,6 +4577,9 @@ router.get('/reports/end-of-period', asyncHandler(async (req, res) => {
           customer: invoice.customerName,
           store: storeShortLabel(invoice.store),
           total: Number(invoice.total || 0),
+          // What has actually been received, so the report can rank customers
+          // on money paid rather than money invoiced.
+          paid: Number(invoice.payload?.paid ?? invoice.payload?.amountPaid ?? 0) || 0,
           paymentStatus: paymentStatusLabel(invoice.paymentStatus),
           paymentMethod: invoice.payload?.paymentMethod ? paymentMethodLabel(invoice.payload.paymentMethod) : '—',
           approvalStatus: invoice.payload?.accountApprovalStatus || 'Pending Accounts',
