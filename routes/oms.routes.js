@@ -1874,6 +1874,21 @@ router.get('/invoices/sent', asyncHandler(async (req, res) => {
     order: [['createdAt', 'DESC']],
     limit: 100,
   });
+  // Orders left reading "Assigned" after their tailor was taken off (before
+  // unassigning moved them back) are put right as they are listed, so the
+  // store can edit them again.
+  const nobodyAssigned = (sheet) => {
+    const named = (value) => value && value !== 'Unassigned';
+    return !named(sheet.tailor)
+      && !(Array.isArray(sheet.tailors) && sheet.tailors.length)
+      && !(Array.isArray(sheet.items) && sheet.items.some((item) => Array.isArray(item.tailors) && item.tailors.length));
+  };
+  for (const row of rows) {
+    const sheet = row.payload?.orderSheet;
+    if (sheet?.status === 'Assigned' && nobodyAssigned(sheet)) {
+      await row.update({ payload: { ...row.payload, orderSheet: { ...sheet, status: 'Order Sheet Confirmed' } } });
+    }
+  }
   const invoices = req.staff?.role === 'tailor'
     ? rows.filter((invoice) => tailorHasDepartmentWork(req.staff, invoice.payload?.orderSheet))
     : rows;
@@ -3289,7 +3304,9 @@ router.patch('/jobs/:invoiceNumber/fabrics', requireRole('inventory_manager', 'p
     const clean = [];
     for (const line of lines) {
       if (line?.clientSupplied) {
-        clean.push({ clientSupplied: true, name: 'Client supplied', ...(line.departmentKey ? { departmentKey: String(line.departmentKey) } : {}) });
+        // "Private supplied" is fabric the shop sources outside inventory: like
+        // the customer's own, nothing is taken from stock for it.
+        clean.push({ clientSupplied: true, ...(line.privateSupplied ? { privateSupplied: true, name: 'Private supplied' } : { name: 'Client supplied' }), ...(line.departmentKey ? { departmentKey: String(line.departmentKey) } : {}) });
         continue;
       }
       const fabric = knownFabrics.get(String(line?.fabricId));
@@ -3314,7 +3331,7 @@ router.patch('/jobs/:invoiceNumber/fabrics', requireRole('inventory_manager', 'p
     items[index] = {
       ...items[index],
       fabrics: clean,
-      fabric: first?.clientSupplied ? 'Client supplied' : first?.name || '',
+      fabric: first?.clientSupplied ? (first.privateSupplied ? 'Private supplied' : 'Client supplied') : first?.name || '',
       fabricId: first?.fabricId || '',
       fabricUnit: first?.unit || '',
       fabricUsage: first?.quantity || '',
@@ -3464,7 +3481,11 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
     // Each item carries its own due date; the order-level one is the earliest
     // of them, for the board and any older reader of the single field.
     tailorDueDate: items.map((item) => item.tailorDueDate).filter(Boolean).sort()[0] || sheet.tailorDueDate || '',
-    status: everyone.length && sheet.status === 'Order Sheet Confirmed' ? 'Assigned' : sheet.status,
+    // Taking the last tailor off puts the order back to waiting for one, so
+    // it reads "Ready to Assign" again and the store can still edit it.
+    status: everyone.length && sheet.status === 'Order Sheet Confirmed'
+      ? 'Assigned'
+      : (!everyone.length && sheet.status === 'Assigned' ? 'Order Sheet Confirmed' : sheet.status),
     updatedAt: new Date().toISOString(),
   };
   await saveOrderSheet(invoice, nextSheet);
