@@ -3229,29 +3229,46 @@ router.patch('/invoices/:invoiceNumber/order-sheet/archive', requireRole('owner'
 // has been released against it, since stock taken out is not put back by a
 // delete. An order-sheet-only record (no invoice behind it) goes entirely.
 router.delete('/invoices/:invoiceNumber/order-sheet', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
-  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
-  if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
-  const payload = invoice.payload || {};
-  const sheet = payload.orderSheet;
-  if (!sheet?.status) return res.status(404).json({ success: false, message: 'This invoice has no order sheet' });
-  if (sheet.status !== 'Order Sheet Confirmed') {
-    return res.status(409).json({ success: false, message: `This order sheet is already ${String(sheet.status).toLowerCase()} in production. Stop it there before deleting it.` });
-  }
-  const released = sheet.fabricAllocated || (Array.isArray(sheet.items) && sheet.items.some((item) => item.fabricAllocated));
-  if (released) {
-    return res.status(409).json({ success: false, message: 'Fabric has already been released for this order sheet, so it cannot be deleted.' });
-  }
-  if (payload.orderSheetOnly) {
-    await invoice.destroy();
-    await notifyRoles(['owner', 'admin'], `${req.staff.displayName} deleted the order sheet ${invoice.invoiceNumber} for ${invoice.customerName}.`,
-      { invoiceNumber: invoice.invoiceNumber, event: 'order_sheet_deleted' });
-    return res.json({ success: true, message: 'Order sheet deleted', data: { removedInvoice: true, invoiceNumber: invoice.invoiceNumber } });
-  }
-  const { orderSheet: _removed, ...rest } = payload;
-  await invoice.update({ payload: rest });
-  await notifyRoles(['owner', 'admin'], `${req.staff.displayName} deleted the order sheet for ${invoice.invoiceNumber}.`,
+  // The checks and the removal happen on one locked row, so fabric released or
+  // work started a moment earlier cannot slip past them.
+  let outcome;
+  await db.sequelize.transaction(async (transaction) => {
+    const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber }, transaction, lock: transaction.LOCK.UPDATE });
+    if (!invoice) { const error = new Error('Invoice not found'); error.status = 404; throw error; }
+    const payload = invoice.payload || {};
+    const sheet = payload.orderSheet;
+    if (!sheet?.status) { const error = new Error('This invoice has no order sheet'); error.status = 404; throw error; }
+    if (sheet.status !== 'Order Sheet Confirmed') {
+      const error = new Error(`This order sheet is already ${String(sheet.status).toLowerCase()} in production. Stop it there before deleting it.`);
+      error.status = 409;
+      throw error;
+    }
+    const released = sheet.fabricAllocated || (Array.isArray(sheet.items) && sheet.items.some((item) => item.fabricAllocated));
+    if (released) {
+      const error = new Error('Fabric has already been released for this order sheet, so it cannot be deleted.');
+      error.status = 409;
+      throw error;
+    }
+    if (payload.orderSheetOnly) {
+      await invoice.destroy({ transaction });
+      outcome = { invoice, removedInvoice: true };
+      return;
+    }
+    const { orderSheet: _removed, ...rest } = payload;
+    await invoice.update({ payload: rest }, { transaction });
+    outcome = { invoice, removedInvoice: false };
+  });
+  const { invoice, removedInvoice } = outcome;
+  await notifyRoles(['owner', 'admin'],
+    removedInvoice
+      ? `${req.staff.displayName} deleted the order sheet ${invoice.invoiceNumber} for ${invoice.customerName}.`
+      : `${req.staff.displayName} deleted the order sheet for ${invoice.invoiceNumber}.`,
     { invoiceNumber: invoice.invoiceNumber, event: 'order_sheet_deleted' });
-  res.json({ success: true, message: 'Order sheet deleted', data: { invoice: invoiceForStaff(invoice, req.staff) } });
+  res.json({
+    success: true,
+    message: 'Order sheet deleted',
+    data: removedInvoice ? { removedInvoice: true, invoiceNumber: invoice.invoiceNumber } : { invoice: invoiceForStaff(invoice, req.staff) },
+  });
 }));
 
 router.delete('/invoices/:invoiceNumber', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
@@ -4139,11 +4156,16 @@ router.post('/fabrics/allocate', requireRole('inventory_manager', 'owner', 'admi
       const hasStoreBalances = Object.keys(balances).length > 0;
       // Normally the order's own store. Inventory may take it from any other
       // location that holds enough, so stock sitting elsewhere is not stuck.
-      const allocationStore = line.fromStore && hasStoreBalances
-        ? (Object.prototype.hasOwnProperty.call(balances, line.fromStore) ? line.fromStore : normalizeStoreKey(line.fromStore))
-        : normalizeStoreKey(invoice.store);
-      const available = hasStoreBalances ? Number(balances[allocationStore] || 0) : Number(fabric.quantity || 0);
-      if (line.amount > available) {
+      const holds = (key) => Object.prototype.hasOwnProperty.call(balances, key);
+      if (line.fromStore && hasStoreBalances && !holds(line.fromStore)) {
+        const error = new Error(`${fabric.name} is not held at that location`);
+        error.status = 400;
+        throw error;
+      }
+      const allocationStore = line.fromStore && hasStoreBalances ? line.fromStore : normalizeStoreKey(invoice.store);
+      // Read only a balance the fabric really has; anything else is nothing.
+      const available = hasStoreBalances ? (holds(allocationStore) ? Number(balances[allocationStore]) : 0) : Number(fabric.quantity || 0);
+      if (!Number.isFinite(available) || line.amount > available) {
         const error = new Error(`Only ${available} ${fabric.unit} of ${fabric.name} is available at ${allocationStore === 'storage' ? 'Storage' : storeShortLabel(allocationStore)}`);
         error.status = 400;
         throw error;
