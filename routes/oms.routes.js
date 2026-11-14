@@ -3259,6 +3259,7 @@ router.delete('/invoices/:invoiceNumber/order-sheet', requireRole('owner'), asyn
     outcome = { invoice, removedInvoice: false };
   });
   const { invoice, removedInvoice } = outcome;
+  await JobComment.destroy({ where: { invoiceNumber: invoice.invoiceNumber } });
   await notifyRoles(['owner', 'admin'],
     removedInvoice
       ? `${req.staff.displayName} deleted the order sheet ${invoice.invoiceNumber} for ${invoice.customerName}.`
@@ -3297,7 +3298,10 @@ router.delete('/invoices/:invoiceNumber', requireRole('owner', 'admin'), asyncHa
     });
   }
 
+  // The order and its order sheet live inside this record, so they go with it;
+  // the job's comment thread belonged to them and goes too.
   await invoice.destroy();
+  await JobComment.destroy({ where: { invoiceNumber: invoice.invoiceNumber } });
   await notifyRoles(['accounts', 'owner', 'admin'],
     `${req.staff.displayName} deleted invoice ${invoice.invoiceNumber} for ${invoice.customerName}.`,
     { event: 'invoice_deleted' });
