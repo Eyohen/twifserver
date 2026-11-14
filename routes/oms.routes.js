@@ -34,6 +34,7 @@ const CHANNEL_BY_EVENT = {
   inventory_edit_rejected: 'Inventory',
   fabric_allocated: 'Inventory',
   fabric_requested: 'Inventory',
+  fabric_declined: 'Production',
   job_comment: 'Production',
   payment_recorded: 'Payments',
   low_stock: 'Inventory',
@@ -58,6 +59,7 @@ const TITLE_BY_EVENT = {
   inventory_edit_rejected: 'Inventory edit rejected',
   fabric_allocated: 'Fabric allocated to a job',
   fabric_requested: 'Fabric awaiting Inventory approval',
+  fabric_declined: 'Fabric declined by Inventory',
   job_comment: 'New comment on a job',
   payment_recorded: 'Payment recorded',
   low_stock: 'Low stock threshold reached',
@@ -3364,6 +3366,35 @@ router.patch('/jobs/:invoiceNumber/fabrics', requireRole('inventory_manager', 'p
   res.json({ success: true, data: { orderSheet: nextSheet } });
 }));
 
+// Inventory (or the Owner/Admin) turns a request down. Nothing leaves stock;
+// Production is told, and picks again.
+router.patch('/jobs/:invoiceNumber/fabrics/decline', requireRole('inventory_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Order not found' });
+  const sheet = orderSheetOf(invoice);
+  const items = Array.isArray(sheet.items) ? [...sheet.items] : [];
+  const index = Number(req.body?.index);
+  if (!Number.isInteger(index) || index < 0 || index >= items.length) {
+    return res.status(400).json({ success: false, message: 'Say which garment this is for' });
+  }
+  const item = items[index];
+  if (item.fabricAllocated) return res.status(409).json({ success: false, message: 'This fabric has already been released' });
+  if (item.fabricRequest?.status !== 'Pending') return res.status(409).json({ success: false, message: 'There is no fabric request waiting on this garment' });
+  const reason = String(req.body?.reason || '').trim().slice(0, 300);
+  items[index] = {
+    ...item,
+    fabricRequest: { ...item.fabricRequest, status: 'Declined', declinedBy: req.staff?.displayName || '', declinedAt: new Date().toISOString(), declineReason: reason },
+  };
+  const nextSheet = { ...sheet, items, updatedAt: new Date().toISOString() };
+  await saveOrderSheet(invoice, nextSheet);
+  await notifyRoles(
+    ['production_manager'],
+    `${req.staff?.displayName || 'Inventory'} declined the fabric for ${item.item || `item ${index + 1}`} on ${invoice.invoiceNumber}${reason ? `: ${reason}` : '.'} Choose another.`,
+    { invoiceNumber: invoice.invoiceNumber, event: 'fabric_declined' }
+  );
+  res.json({ success: true, data: { orderSheet: nextSheet } });
+}));
+
 router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
   if (!invoice) return res.status(404).json({ success: false, message: 'Order not found' });
@@ -4005,7 +4036,9 @@ router.patch('/inventory-edit-requests/:id/review', requireRole('owner', 'admin'
 // A garment can take more than one fabric — a shell and a lining, or two
 // colours — so an order sheet carries a list, each with its own quantity. One
 // fabric still works: it arrives as a list of one.
-router.post('/fabrics/allocate', requireRole('production_manager', 'inventory_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
+// Releasing stock is the approval, so it is Inventory's (or the Owner's and
+// Admin's) to give — Production asks, it does not release.
+router.post('/fabrics/allocate', requireRole('inventory_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const { trackingToken: token, tailorName } = req.body;
   // Which garment this allocation is for. Undefined/null means the whole
   // job — the only option before fabric was tracked per item, and still how
