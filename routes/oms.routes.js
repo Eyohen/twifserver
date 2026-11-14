@@ -33,6 +33,7 @@ const CHANNEL_BY_EVENT = {
   inventory_edit_approved: 'Inventory',
   inventory_edit_rejected: 'Inventory',
   fabric_allocated: 'Inventory',
+  fabric_requested: 'Inventory',
   job_comment: 'Production',
   payment_recorded: 'Payments',
   low_stock: 'Inventory',
@@ -56,6 +57,7 @@ const TITLE_BY_EVENT = {
   inventory_edit_approved: 'Inventory edit approved',
   inventory_edit_rejected: 'Inventory edit rejected',
   fabric_allocated: 'Fabric allocated to a job',
+  fabric_requested: 'Fabric awaiting Inventory approval',
   job_comment: 'New comment on a job',
   payment_recorded: 'Payment recorded',
   low_stock: 'Low stock threshold reached',
@@ -3272,6 +3274,8 @@ router.patch('/jobs/:invoiceNumber/fabrics', requireRole('inventory_manager', 'p
   const requested = Array.isArray(req.body?.items) ? req.body.items : [];
   if (!requested.length) return res.status(400).json({ success: false, message: 'Say which garment the fabric is for' });
   const knownFabrics = new Map((await Fabric.findAll({ attributes: ['id', 'name', 'unit'] })).map((fabric) => [String(fabric.id), fabric]));
+  const submitting = req.body?.submit === true && ['production_manager', 'owner', 'admin'].includes(req.staff?.role);
+  const requestedItems = [];
 
   for (const entry of requested) {
     const index = Number(entry.index);
@@ -3303,6 +3307,10 @@ router.patch('/jobs/:invoiceNumber/fabrics', requireRole('inventory_manager', 'p
       });
     }
     const [first] = clean;
+    // Production choosing fabric is a request: nothing leaves stock until the
+    // Inventory Officer approves it by releasing it. Sending it records who
+    // asked and what for, and tells Inventory there is something to look at.
+    const askingForStock = submitting && clean.some((line) => line.fabricId);
     items[index] = {
       ...items[index],
       fabrics: clean,
@@ -3310,7 +3318,16 @@ router.patch('/jobs/:invoiceNumber/fabrics', requireRole('inventory_manager', 'p
       fabricId: first?.fabricId || '',
       fabricUnit: first?.unit || '',
       fabricUsage: first?.quantity || '',
+      ...(askingForStock ? {
+        fabricRequest: {
+          status: 'Pending',
+          requestedBy: req.staff?.displayName || 'Production',
+          requestedAt: new Date().toISOString(),
+          fabrics: clean,
+        },
+      } : {}),
     };
+    if (askingForStock) requestedItems.push(items[index].item || `item ${index + 1}`);
   }
 
   const nextSheet = {
@@ -3320,6 +3337,13 @@ router.patch('/jobs/:invoiceNumber/fabrics', requireRole('inventory_manager', 'p
     updatedAt: new Date().toISOString(),
   };
   await saveOrderSheet(invoice, nextSheet);
+  if (requestedItems.length) {
+    await notifyRoles(
+      ['inventory_manager'],
+      `${req.staff?.displayName || 'Production'} chose fabric for ${requestedItems.join(', ')} on ${invoice.invoiceNumber}. Approve it to release the fabric.`,
+      { invoiceNumber: invoice.invoiceNumber, event: 'fabric_requested' }
+    );
+  }
   res.json({ success: true, data: { orderSheet: nextSheet } });
 }));
 
@@ -4077,6 +4101,9 @@ router.post('/fabrics/allocate', requireRole('production_manager', 'inventory_ma
       fabricUnit: first.fabric.unit,
       fabricAllocated: true,
       fabricAllocatedAt: new Date().toISOString(),
+      ...(targetItem?.fabricRequest ? {
+        fabricRequest: { ...targetItem.fabricRequest, status: 'Approved', approvedBy: req.staff?.displayName || '', approvedAt: new Date().toISOString() },
+      } : {}),
     };
 
     let nextOrderSheet;
