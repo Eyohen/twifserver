@@ -8,6 +8,7 @@ const QRCode = require('qrcode');
 const multer = require('multer');
 const db = require('../models');
 const { createTwifInvoiceHtml, getTwifStoreDetails } = require('../utils/twifInvoiceTemplate');
+const tailorTargets = require('../utils/tailorTargets');
 const { refreshStoreCache, listStores, storeKeys, normalizeStoreKey } = require('../utils/storeDirectory');
 const { refreshDepartmentCache, listDepartments, withAdditionalInformation } = require('../utils/departmentDirectory');
 const { sendEmail } = require('../services/email.service');
@@ -16,7 +17,7 @@ const cloudinaryService = require('../services/cloudinary.service');
 const { signStaffToken, requireStaff, requireRole } = require('../middleware/staffAuth');
 
 const router = express.Router();
-const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment, StaffLoginEvent, Store, Department, ShopifyOrder } = db;
+const { StaffUser, Customer, Invoice, OrderSheet, Fabric, SentInvoice, OmsNotification, InventoryAllocation, InventoryEditRequest, JobComment, TailorWeeklyRecord, StaffLoginEvent, Store, Department, ShopifyOrder } = db;
 
 // The channel drives the category filter in the notification inbox, so it is
 // derived from the event rather than hardcoded.
@@ -1025,6 +1026,15 @@ router.patch('/departments/:id', requireRole('owner', 'admin'), asyncHandler(asy
   res.json({ success: true, data: { department } });
 }));
 
+// A weekly target is a whole number of jobs, 1 to 1000. Nothing (or blank) clears
+// it. Returns undefined when it was not sent, null to clear, NaN when invalid.
+const parseWeeklyTarget = (value) => {
+  if (value === undefined) return undefined;
+  if (value === null || String(value).trim() === '') return null;
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 1 && number <= 1000 ? number : Number.NaN;
+};
+
 router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
   const {
     phone,
@@ -1039,6 +1049,14 @@ router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, re
     tailorDepartments,
     tailorGrade,
   } = req.body;
+  const newWeeklyTarget = role === 'tailor' ? parseWeeklyTarget(req.body.weeklyTarget) : undefined;
+  if (Number.isNaN(newWeeklyTarget)) {
+    return res.status(400).json({ success: false, message: 'The weekly target must be a whole number of jobs, from 1 to 1000' });
+  }
+  // How many jobs a tailor is expected to finish each week is the Owner's to set.
+  if (newWeeklyTarget && req.staff.role !== 'owner') {
+    return res.status(403).json({ success: false, message: 'Only the Owner can set a weekly target for a tailor' });
+  }
 
   if (!phone || !pin || !displayName || !role) {
     return res.status(400).json({
@@ -1111,6 +1129,10 @@ router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, re
     tailorDepartment: requestedTailorDepartments[0] || null,
     tailorDepartments: requestedTailorDepartments,
     tailorGrade,
+    ...(newWeeklyTarget ? {
+      weeklyTarget: newWeeklyTarget,
+      weeklyTargetHistory: [{ target: newWeeklyTarget, effectiveFrom: new Date().toISOString(), setBy: req.staff.displayName }],
+    } : {}),
   });
 
   res.status(201).json({
@@ -1129,6 +1151,7 @@ router.post('/staff', requireRole('owner', 'admin'), asyncHandler(async (req, re
         tailorDepartment: staffUser.tailorDepartment,
         tailorDepartments: tailorDepartmentsOf(staffUser),
         tailorGrade: staffUser.tailorGrade,
+        weeklyTarget: staffUser.weeklyTarget,
       },
     },
   });
@@ -1141,7 +1164,7 @@ router.get('/staff', asyncHandler(async (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   const staffUsers = await StaffUser.findAll({
     order: [['createdAt', 'DESC']],
-    attributes: ['id', 'phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'pinChangedAt', 'tailorDepartment', 'tailorDepartments', 'tailorGrade', 'twoFactorEnabledAt', 'twoFactorRequired', 'createdAt'],
+    attributes: ['id', 'phone', 'email', 'fullName', 'displayName', 'role', 'store', 'status', 'profileImageUrl', 'dateOfBirth', 'lastLoginAt', 'pinChangedAt', 'tailorDepartment', 'tailorDepartments', 'tailorGrade', 'weeklyTarget', 'twoFactorEnabledAt', 'twoFactorRequired', 'createdAt'],
   });
 
   res.json({ success: true, data: { staffUsers } });
@@ -1227,6 +1250,26 @@ router.patch('/staff/:id', requireRole('owner', 'admin'), asyncHandler(async (re
     updates.tailorDepartment = null;
     updates.tailorDepartments = [];
     updates.tailorGrade = null;
+  }
+  // The weekly target. The edit screen sends every field back on save, so only an
+  // actual change is held to the Owner. Each change is kept with the moment it
+  // took effect; the weeks already gone keep the target they were judged on.
+  const requestedWeeklyTarget = parseWeeklyTarget(req.body.weeklyTarget);
+  if (Number.isNaN(requestedWeeklyTarget)) {
+    return res.status(400).json({ success: false, message: 'The weekly target must be a whole number of jobs, from 1 to 1000' });
+  }
+  const currentWeeklyTarget = staffUser.weeklyTarget ?? null;
+  if (resultingRole !== 'tailor') {
+    if (currentWeeklyTarget !== null) {
+      updates.weeklyTarget = null;
+      updates.weeklyTargetHistory = [...(Array.isArray(staffUser.weeklyTargetHistory) ? staffUser.weeklyTargetHistory : []), { target: null, effectiveFrom: new Date().toISOString(), setBy: req.staff.displayName }];
+    }
+  } else if (requestedWeeklyTarget !== undefined && requestedWeeklyTarget !== currentWeeklyTarget) {
+    if (req.staff.role !== 'owner') {
+      return res.status(403).json({ success: false, message: 'Only the Owner can change a tailor\'s weekly target' });
+    }
+    updates.weeklyTarget = requestedWeeklyTarget;
+    updates.weeklyTargetHistory = [...(Array.isArray(staffUser.weeklyTargetHistory) ? staffUser.weeklyTargetHistory : []), { target: requestedWeeklyTarget, effectiveFrom: new Date().toISOString(), setBy: req.staff.displayName }];
   }
   // A PIN that has been reset has usually been reset because it was known to
   // someone else, so every session it opened is ended with it.
@@ -1910,16 +1953,6 @@ router.get('/invoices/sent', asyncHandler(async (req, res) => {
     const sheet = row.payload?.orderSheet;
     if (sheet?.status === 'Assigned' && nobodyAssigned(sheet)) {
       await row.update({ payload: { ...row.payload, orderSheet: { ...sheet, status: 'Order Sheet Confirmed' } } });
-      continue;
-    }
-    // Assignments made before the day was recorded are given the last date the
-    // sheet changed, once, so a later save cannot move them into a newer period.
-    if (Array.isArray(sheet?.items) && sheet.items.some((item) => (item.tailors || []).some((name) => !item.tailorAssignedAt?.[name]))) {
-      const when = sheet.updatedAt || (row.updatedAt ? new Date(row.updatedAt).toISOString() : new Date().toISOString());
-      const items = sheet.items.map((item) => ((item.tailors || []).some((name) => !item.tailorAssignedAt?.[name])
-        ? { ...item, tailorAssignedAt: { ...(item.tailorAssignedAt || {}), ...Object.fromEntries((item.tailors || []).filter((name) => !item.tailorAssignedAt?.[name]).map((name) => [name, when])) } }
-        : item));
-      await row.update({ payload: { ...row.payload, orderSheet: { ...sheet, items } } });
     }
   }
   const invoices = req.staff?.role === 'tailor'
@@ -3637,16 +3670,9 @@ router.patch('/jobs/:invoiceNumber/assignments', requireRole('production_manager
         return res.status(400).json({ success: false, message: `${invalid} is not an active tailor in this item's department` });
       }
     }
-    // The day each tailor was put on this garment, so workload can be read over
-    // a period. Kept for tailors who stay on it, dropped for those taken off.
-    const nowIso = new Date().toISOString();
-    const keptStamps = Object.fromEntries(Object.entries(items[index].tailorAssignedAt || {}).filter(([name]) => names.includes(name)));
-    const previouslyOnItem = new Set(items[index].tailors || []);
-    const tailorAssignedAt = Object.fromEntries(names.map((name) => [name, keptStamps[name] || (previouslyOnItem.has(name) ? null : nowIso)]).filter(([, at]) => at));
     items[index] = {
       ...items[index],
       tailors: names,
-      tailorAssignedAt,
       ...(entry.tailorDueDate !== undefined ? { tailorDueDate: entry.tailorDueDate } : {}),
       ...(Array.isArray(entry.fabrics) ? { fabrics: entry.fabrics } : {}),
     };
@@ -4545,9 +4571,6 @@ const DEFAULT_SETTINGS = {
   invoicePrefix: 'INV',
   invoiceValidityHours: 48,
   productionLeadTimeWeeks: 4,
-  // The most jobs one tailor is meant to carry. The Production overview shows
-  // each tailor's load against it. The Owner sets it.
-  tailorWorkloadMax: 5,
   collectionReminderDays: 7,
   lowStockThreshold: 5,
   currency: 'NGN',
@@ -4617,18 +4640,7 @@ router.put('/settings', requireRole('owner', 'admin'), asyncHandler(async (req, 
     next.paymentReleasePercent = Math.min(100, Math.max(0, Math.round(next.paymentReleasePercent)));
   }
 
-  // A whole number of jobs, at least one.
-  if ('tailorWorkloadMax' in next) {
-    next.tailorWorkloadMax = Math.min(1000, Math.max(1, Math.round(next.tailorWorkloadMax)));
-  }
-
   const current = await readSetting(SETTINGS_KEY, {});
-  // How many jobs a tailor may carry is the Owner's call. The settings page
-  // sends every value back on save, so only a change to it is refused here.
-  if ('tailorWorkloadMax' in next && req.staff?.role !== 'owner'
-      && next.tailorWorkloadMax !== Number(current.tailorWorkloadMax ?? DEFAULT_SETTINGS.tailorWorkloadMax)) {
-    return res.status(403).json({ success: false, message: 'Only the Owner can change the maximum workload for tailors' });
-  }
   const settings = { ...DEFAULT_SETTINGS, ...current, ...next };
   await writeSetting(SETTINGS_KEY, settings, 'oms');
   res.json({ success: true, data: { settings } });
@@ -4749,6 +4761,93 @@ router.delete('/membership-tiers/:id', asyncHandler(async (req, res) => {
 // Production marked it ready. Jobs finished before that day was recorded are
 // given the last date their sheet changed, once, and keep it from then on, so
 // a later save (scoring a tailor, say) cannot move them into a newer period.
+// Weekly production targets. A week is Monday to Sunday (West Africa Time).
+// What a tailor completed is counted across every finished job, not just the
+// latest hundred the lists carry, and each week is its own count against the
+// target in force for it. Nothing is added to or taken from any other week.
+const departmentNamesFor = (staff) => tailorDepartmentsOf(staff).map((key) => listDepartments().find((entry) => entry.key === key)?.name || key);
+
+const tailorWeeks = async (staff, weekCount, jobs, now) => {
+  const current = tailorTargets.weekStartOf(now);
+  const starts = Array.from({ length: weekCount }, (_, index) => tailorTargets.addWeeks(current, -index))
+    // Only weeks the account existed for.
+    .filter((weekStart) => tailorTargets.weekBounds(weekStart).end >= new Date(staff.createdAt || 0));
+  if (!starts.length) return [];
+  const stored = await TailorWeeklyRecord.findAll({ where: { staffId: staff.id, weekStart: { [Op.in]: starts } } });
+  const byWeek = new Map(stored.map((record) => [String(record.weekStart), record]));
+  const weeks = [];
+  for (const weekStart of starts) {
+    weeks.push(await tailorTargets.weekFigures(db, staff, weekStart, jobs, now, byWeek.get(weekStart) || null));
+  }
+  return weeks;
+};
+
+const readWeekCount = (value, fallback = 12) => Math.min(52, Math.max(1, Math.round(Number(value) || fallback)));
+
+router.get('/tailor-targets', requireRole('owner', 'admin', 'production_manager'), asyncHandler(async (req, res) => {
+  const now = new Date();
+  const currentWeek = tailorTargets.weekStartOf(now);
+  const asked = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.week || '')) ? tailorTargets.weekStartOf(new Date(`${req.query.week}T12:00:00Z`)) : currentWeek;
+  // A week that has not begun has nothing to show.
+  const weekStart = asked > currentWeek ? currentWeek : asked;
+
+  await tailorTargets.ensureReadyDates(db);
+  const tailors = await StaffUser.findAll({ where: { role: 'tailor', status: 'active' }, order: [['displayName', 'ASC']] });
+  // The weeks behind the one on screen, for the review flags.
+  const jobs = await tailorTargets.finishedJobsSince(db, tailorTargets.weekBounds(tailorTargets.addWeeks(weekStart < currentWeek ? weekStart : currentWeek, -8)).start);
+
+  const rows = [];
+  for (const staff of tailors) {
+    // Eight weeks back, which the jobs read above cover in full.
+    const weeks = await tailorWeeks(staff, 8, jobs, now);
+    const shown = weeks.find((week) => week.weekStart === weekStart)
+      || await tailorTargets.weekFigures(db, staff, weekStart, jobs, now, await TailorWeeklyRecord.findOne({ where: { staffId: staff.id, weekStart } }));
+    rows.push({
+      id: staff.id,
+      name: staff.displayName,
+      departments: departmentNamesFor(staff),
+      grade: staff.tailorGrade,
+      target: shown.target,
+      completed: shown.completed,
+      status: shown.status,
+      // Worked out from the weeks already finished; only ever shown to management.
+      flag: tailorTargets.reviewFlag(weeks.filter((week) => week.closed)),
+    });
+  }
+  const bounds = tailorTargets.weekBounds(weekStart);
+  res.json({
+    success: true,
+    data: {
+      week: { start: weekStart, end: bounds.end.toISOString(), current: weekStart === currentWeek },
+      tailors: rows,
+    },
+  });
+}));
+
+router.get('/tailor-targets/history', requireRole('owner', 'admin', 'production_manager'), asyncHandler(async (req, res) => {
+  const staff = await StaffUser.findOne({ where: { id: String(req.query.staffId || ''), role: 'tailor' } });
+  if (!staff) return res.status(404).json({ success: false, message: 'Tailor not found' });
+  const now = new Date();
+  const count = readWeekCount(req.query.weeks);
+  await tailorTargets.ensureReadyDates(db);
+  const jobs = await tailorTargets.finishedJobsSince(db, tailorTargets.weekBounds(tailorTargets.addWeeks(tailorTargets.weekStartOf(now), -(count + 8))).start);
+  const weeks = await tailorWeeks(staff, count, jobs, now);
+  res.json({ success: true, data: { tailor: { id: staff.id, name: staff.displayName, departments: departmentNamesFor(staff), target: tailorTargets.targetForWeek(staff, tailorTargets.weekBounds(tailorTargets.weekStartOf(now)).end) }, weeks, flag: tailorTargets.reviewFlag(weeks.filter((week) => week.closed)) } });
+}));
+
+// A tailor's own record. The management flags are left out: they are for the
+// people deciding on bonuses and reviews, not part of what a tailor is shown.
+router.get('/tailor-targets/me', requireRole('tailor'), asyncHandler(async (req, res) => {
+  const staff = await StaffUser.findByPk(req.staff.id);
+  if (!staff) return res.status(404).json({ success: false, message: 'Account not found' });
+  const now = new Date();
+  const count = readWeekCount(req.query.weeks);
+  await tailorTargets.ensureReadyDates(db);
+  const jobs = await tailorTargets.finishedJobsSince(db, tailorTargets.weekBounds(tailorTargets.addWeeks(tailorTargets.weekStartOf(now), -(count + 8))).start);
+  const weeks = await tailorWeeks(staff, count, jobs, now);
+  res.json({ success: true, data: { tailor: { id: staff.id, name: staff.displayName, departments: departmentNamesFor(staff) }, weeks } });
+}));
+
 const FINISHED_SHEET_STATES = ['Ready', 'Ready for Collection', 'Completed'];
 router.get('/stats/completed-jobs', requireRole('owner', 'admin'), asyncHandler(async (req, res) => {
   const parse = (value) => { const at = new Date(String(value || '')); return Number.isNaN(at.getTime()) ? null : at; };

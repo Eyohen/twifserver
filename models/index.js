@@ -18,6 +18,7 @@ const activeModelFiles = [
   'inventoryAllocation.js',
   'inventoryEditRequest.js',
   'jobComment.js',
+  'tailorWeeklyRecord.js',
   'staffLoginEvent.js',
   'sentInvoice.js',
   // Backs OMS settings and membership tiers as JSON rows, which avoids a

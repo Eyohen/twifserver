@@ -97,6 +97,18 @@ module.exports = (sequelize, DataTypes) => {
         max: 5,
       },
     },
+    // How many jobs this tailor is expected to complete each week. Set by the
+    // Owner. Each change is kept in weeklyTargetHistory with the moment it took
+    // effect, so a week is always judged against the target that applied then.
+    weeklyTarget: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+    weeklyTargetHistory: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: [],
+    },
     googleAuthEnabled: {
       type: DataTypes.BOOLEAN,
       allowNull: false,
