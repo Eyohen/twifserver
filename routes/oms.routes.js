@@ -38,6 +38,8 @@ const CHANNEL_BY_EVENT = {
   fabric_declined: 'Production',
   job_comment: 'Production',
   payment_recorded: 'Payments',
+  payment_review: 'Payments',
+  payment_clarified: 'Payments',
   low_stock: 'Inventory',
   customer_updated: 'System',
   customer_archived: 'System',
@@ -63,6 +65,8 @@ const TITLE_BY_EVENT = {
   fabric_declined: 'Fabric declined by Inventory',
   job_comment: 'New comment on a job',
   payment_recorded: 'Payment recorded',
+  payment_review: 'Accounts reviewed a payment',
+  payment_clarified: 'Payment clarification sent',
   low_stock: 'Low stock threshold reached',
   customer_updated: 'Customer profile updated',
   customer_archived: 'Customer profile archived',
@@ -770,6 +774,7 @@ const formatSentInvoice = (invoice) => {
       ? payload.paymentEvidence
       : (payload.paymentEvidence ? [payload.paymentEvidence] : [])
     ).map((item) => ({
+      paymentId: item.paymentId || null,
       name: item.name || 'Payment evidence',
       type: item.type || '',
       size: item.size || 0,
@@ -996,14 +1001,24 @@ router.patch('/departments/:id', requireRole('owner', 'admin'), asyncHandler(asy
   if (name !== undefined && !String(name).trim()) {
     return res.status(400).json({ success: false, message: 'A department needs a name.' });
   }
-  if ((fields !== undefined || note !== undefined) && req.staff.role !== 'owner') {
+  const isOwner = req.staff.role === 'owner';
+  // The edit screen sends the note back whole on every save, so only an actual
+  // change to it is held to the Owner.
+  const noteChanged = note !== undefined && String(note).trim().slice(0, 2000) !== String(department.note || '');
+  if (noteChanged && !isOwner) {
     return res.status(403).json({ success: false, message: 'Only the Owner can change department parameters.' });
   }
   let cleanFields;
   if (fields !== undefined) {
     if (!Array.isArray(fields)) return res.status(400).json({ success: false, message: 'Department parameters must be a list.' });
     cleanFields = withAdditionalInformation(fields.map((entry) => ({
-      key: slugifyDepartmentKey(entry?.key || entry?.label).replace(/-([a-z0-9])/g, (_, letter) => letter.toUpperCase()),
+      // A parameter that already has a key keeps it exactly: it is what saved
+      // order sheets are filed under, and lowercasing it (fabricColor ->
+      // fabriccolor) detached every existing value from its field. Only a
+      // parameter with no key yet gets one made from its name.
+      key: /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(String(entry?.key || '').trim())
+        ? String(entry.key).trim()
+        : slugifyDepartmentKey(entry?.label).replace(/-([a-z0-9])/g, (_, letter) => letter.toUpperCase()),
       label: String(entry?.label || '').trim().slice(0, 120),
       required: entry?.required !== false,
     })));
@@ -1012,6 +1027,17 @@ router.patch('/departments/:id', requireRole('owner', 'admin'), asyncHandler(asy
     }
     if (new Set(cleanFields.map((entry) => entry.key)).size !== cleanFields.length) {
       return res.status(400).json({ success: false, message: 'Parameter names must be unique within a department.' });
+    }
+    // Anyone else with access to this screen may put the parameters in a
+    // different order, and nothing more: the same parameters, named and
+    // required the same way, is what makes a request a reordering.
+    if (!isOwner) {
+      const describe = (list) => JSON.stringify([...list]
+        .map((entry) => ({ key: entry.key, label: entry.label, required: entry.required !== false }))
+        .sort((left, right) => left.key.localeCompare(right.key)));
+      if (describe(cleanFields) !== describe(withAdditionalInformation(department.fields))) {
+        return res.status(403).json({ success: false, message: 'Only the Owner can add, rename or remove department parameters. You can change their order.' });
+      }
     }
   }
 
@@ -1261,6 +1287,9 @@ router.patch('/staff/:id', requireRole('owner', 'admin'), asyncHandler(async (re
   const currentWeeklyTarget = staffUser.weeklyTarget ?? null;
   if (resultingRole !== 'tailor') {
     if (currentWeeklyTarget !== null) {
+      if (req.staff.role !== 'owner') {
+        return res.status(403).json({ success: false, message: 'Only the Owner can change a tailor\'s weekly target, which this role change would remove' });
+      }
       updates.weeklyTarget = null;
       updates.weeklyTargetHistory = [...(Array.isArray(staffUser.weeklyTargetHistory) ? staffUser.weeklyTargetHistory : []), { target: null, effectiveFrom: new Date().toISOString(), setBy: req.staff.displayName }];
     }
@@ -2444,6 +2473,90 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
   });
 }));
 
+// Each payment recorded after the invoice was raised is reviewed on its own.
+// Accounts approve it or flag it for clarification; neither touches the
+// invoice's own review or any other payment on the invoice.
+const findPayment = (invoice, paymentId) => {
+  const history = Array.isArray(invoice.payload?.paymentHistory) ? invoice.payload.paymentHistory : [];
+  const index = history.findIndex((entry) => entry && entry.id === paymentId);
+  return { history, index, entry: index >= 0 ? history[index] : null };
+};
+
+router.patch('/invoices/:invoiceNumber/payments/:paymentId/review', requireRole('accounts', 'owner', 'admin'), asyncHandler(async (req, res) => {
+  const status = String(req.body?.status || '');
+  const note = String(req.body?.note || '').trim().slice(0, 2000);
+  if (!['Approved', 'Flagged'].includes(status)) {
+    return res.status(400).json({ success: false, message: 'A payment can be Approved or Flagged for clarification.' });
+  }
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+  const { history, index, entry } = findPayment(invoice, req.params.paymentId);
+  if (!entry || !entry.reviewStatus) {
+    return res.status(404).json({ success: false, message: 'That payment is not waiting for review' });
+  }
+  if (entry.reviewStatus === 'Approved') {
+    return res.status(409).json({ success: false, message: 'This payment has already been approved' });
+  }
+  if (entry.reviewStatus === status && status === 'Flagged') {
+    return res.status(409).json({ success: false, message: 'This payment is already flagged for clarification' });
+  }
+  const decidedBy = req.staff?.displayName || 'Accounts';
+  const when = new Date().toISOString();
+  const updatedEntry = {
+    ...entry,
+    reviewStatus: status,
+    reviewNote: note,
+    reviewedBy: decidedBy,
+    reviewedAt: when,
+  };
+  const nextHistory = history.map((item, position) => (position === index ? updatedEntry : item));
+  await invoice.update({ payload: { ...invoice.payload, paymentHistory: nextHistory } });
+
+  const refreshed = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  const verb = status === 'Approved' ? 'approved' : 'flagged for clarification';
+  await notifyRoles(
+    ['store_manager'],
+    `The ${naira(entry.amount)} payment on ${invoice.invoiceNumber} for ${invoice.customerName} was ${verb} by ${decidedBy}.${status === 'Flagged' && note ? ` ${note}` : ''}`,
+    { invoiceNumber: invoice.invoiceNumber, event: 'payment_review', paymentId: entry.id, title: `Payment ${verb}` },
+  );
+  res.json({ success: true, data: { invoice: formatSentInvoice(refreshed) } });
+}));
+
+// The store manager's answer to a flagged payment. It returns the payment to
+// Accounts' queue, the same way a clarified invoice returns.
+router.patch('/invoices/:invoiceNumber/payments/:paymentId/clarify', requireRole('store_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
+  const clarification = String(req.body?.clarification || '').trim().slice(0, 2000);
+  if (!clarification) {
+    return res.status(400).json({ success: false, message: 'Explain the clarification before returning this payment to Accounts.' });
+  }
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+  if (req.staff.role === 'store_manager' && invoice.createdByStaffId !== req.staff.id) {
+    return res.status(403).json({ success: false, message: 'You may only clarify payments on invoices you raised' });
+  }
+  const { history, index, entry } = findPayment(invoice, req.params.paymentId);
+  if (!entry || entry.reviewStatus !== 'Flagged') {
+    return res.status(409).json({ success: false, message: 'That payment is not waiting for a clarification' });
+  }
+  const updatedEntry = {
+    ...entry,
+    reviewStatus: 'Pending Accounts',
+    clarification,
+    clarifiedBy: req.staff.displayName,
+    clarifiedAt: new Date().toISOString(),
+  };
+  const nextHistory = history.map((item, position) => (position === index ? updatedEntry : item));
+  await invoice.update({ payload: { ...invoice.payload, paymentHistory: nextHistory } });
+
+  const refreshed = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  await notifyRoles(
+    ['accounts'],
+    `${req.staff.displayName} clarified the ${naira(entry.amount)} payment on ${invoice.invoiceNumber}. It is ready for review again.`,
+    { invoiceNumber: invoice.invoiceNumber, event: 'payment_clarified', paymentId: entry.id },
+  );
+  res.json({ success: true, data: { invoice: formatSentInvoice(refreshed) } });
+}));
+
 // Recording what a customer actually handed over. An invoice carried a status —
 // unpaid, part paid, fully paid — but no figure, so Accounts could not
 // reconcile and every screen that wanted an amount had to invent one.
@@ -2501,6 +2614,7 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
     paidOn = typed;
   }
 
+  const isPaymentReviewer = ['accounts', 'owner', 'admin'].includes(req.staff.role);
   const totalPaid = alreadyPaid + amount;
   const paymentStatus = totalPaid <= 0 ? 'unpaid' : totalPaid >= payable ? 'fully_paid' : 'partial_paid';
   const method = String(req.body?.method || payload.paymentMethod || 'transfer');
@@ -2508,9 +2622,13 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
   // instalments has a receipt for each one, and a payment recorded with
   // nothing behind it left Accounts nowhere to check the figure against.
   const rawEvidence = Array.isArray(req.body?.paymentEvidence) ? req.body.paymentEvidence : [];
+  // Every payment is its own record with its own review, so it is given an id
+  // and the receipts attached to it are tagged with it.
+  const paymentId = crypto.randomUUID();
   const newEvidence = rawEvidence
     .filter((item) => item && safeImageDataUrl(item.dataUrl))
     .map((item) => ({
+      paymentId,
       name: String(item.name || 'Payment evidence').slice(0, 200),
       type: String(item.type || ''),
       size: Number(item.size || 0),
@@ -2533,6 +2651,7 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
   const history = [
     ...(Array.isArray(payload.paymentHistory) ? payload.paymentHistory : []),
     {
+      id: paymentId,
       amount,
       method,
       note: String(req.body?.note || '').trim() || null,
@@ -2541,6 +2660,16 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
       recordedBy: req.staff.displayName,
       recordedAt: new Date().toISOString(),
       ...(paidOn ? { paidOn } : {}),
+      // Each payment waits for Accounts on its own, apart from the invoice's
+      // own review and from every other payment. Accounts, the Owner and the
+      // Admin are the reviewers, so a payment they record themselves is already
+      // reviewed. Payments from before this existed carry no status and are
+      // covered by the invoice's decision.
+      ...(amount > 0 ? (isPaymentReviewer ? {
+        reviewStatus: 'Approved',
+        reviewedBy: req.staff.displayName,
+        reviewedAt: new Date().toISOString(),
+      } : { reviewStatus: 'Pending Accounts' }) : {}),
     },
   ];
 
@@ -2550,10 +2679,12 @@ router.patch('/invoices/:invoiceNumber/payment', requireRole('accounts', 'owner'
   });
 
   const refreshed = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber } });
+  // Accounts are told as well, because the payment is waiting in their review
+  // queue; the notification and the queue should always say the same thing.
   await notifyRoles(
-    ['store_manager', 'owner'],
+    ['store_manager', 'owner', 'accounts'],
     `${req.staff.displayName} recorded ${naira(amount)} against ${invoice.invoiceNumber}.`,
-    { invoiceNumber: invoice.invoiceNumber, event: 'payment_recorded' },
+    { invoiceNumber: invoice.invoiceNumber, event: 'payment_recorded', paymentId },
   );
 
   res.json({ success: true, data: { invoice: formatSentInvoice(refreshed) } });
@@ -3014,6 +3145,16 @@ router.patch('/tracking/order-sheet/:token', asyncHandler(async (req, res) => {
     } else {
       nextOrderSheet.readyAt = nextOrderSheet.updatedAt;
       nextOrderSheet.readyBy = req.staff?.displayName || null;
+    }
+  } else {
+    // The ready date feeds the weekly performance records, so a request body can
+    // never set or change it; only the server stamps it, above.
+    if (previousOrderSheet.readyAt) {
+      nextOrderSheet.readyAt = previousOrderSheet.readyAt;
+      nextOrderSheet.readyBy = previousOrderSheet.readyBy;
+    } else {
+      delete nextOrderSheet.readyAt;
+      delete nextOrderSheet.readyBy;
     }
   }
 
@@ -4350,6 +4491,10 @@ router.post('/fabrics/allocate', requireRole('inventory_manager', 'owner', 'admi
         name: entry.fabric.name,
         unit: entry.fabric.unit,
         quantity: entry.amount,
+        // Where it was taken from and what that place has left, so the release
+        // can be read back against the stock records.
+        store: entry.allocationStore,
+        remainingAfter: entry.remaining,
       });
     }
 
