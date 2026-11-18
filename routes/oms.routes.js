@@ -685,6 +685,12 @@ const plainTextInvoice = (payload) => {
 
 const paymentStatusLabel = (status) => status === 'fully_paid' ? 'Fully Paid' : status === 'unpaid' ? 'Unpaid' : 'Partial Paid';
 
+// An invoice that comes to nothing owes nothing, so it is fully paid whatever
+// was stored against it (older invoices, or ones re-priced down to zero).
+const effectivePaymentStatus = (invoice) => (Number(invoice?.total) <= 0 && invoice?.total !== null && invoice?.total !== undefined && invoice?.total !== ''
+  ? 'fully_paid'
+  : invoice?.paymentStatus);
+
 // 'pos' reads as "Pos" under a plain capitalize-first-letter, not the
 // initialism store staff actually use.
 const paymentMethodLabel = (method) => (method === 'pos' ? 'POS' : `${String(method).charAt(0).toUpperCase()}${String(method).slice(1)}`);
@@ -737,6 +743,9 @@ const formatSentInvoice = (invoice) => {
     // as a date and worked. A week could therefore hold more orders than a
     // year, and orders raised today counted as none.
     createdAt: (invoice.createdAt || new Date()).toISOString(),
+    // When the invoice last changed — a payment, a review, an edit — so Accounts
+    // can list the most recently touched first.
+    updatedAt: (invoice.updatedAt || invoice.createdAt || new Date()).toISOString(),
     createdAtLabel: new Intl.DateTimeFormat('en-GB', {
       day: '2-digit',
       month: 'short',
@@ -744,9 +753,9 @@ const formatSentInvoice = (invoice) => {
     }).format(invoice.createdAt || new Date()),
     total: Number(invoice.total || 0),
     emailStatus: invoice.emailStatus === 'failed' ? 'Failed' : 'Sent',
-    paymentStatus: paymentStatusLabel(invoice.paymentStatus),
+    paymentStatus: paymentStatusLabel(effectivePaymentStatus(invoice)),
     paymentMethod: payload.paymentMethod ? paymentMethodLabel(payload.paymentMethod) : '—',
-    orderStatus: invoice.orderStatus || paymentStatusLabel(invoice.paymentStatus),
+    orderStatus: (Number(invoice.total) <= 0 && ['Unpaid', 'Partial Paid'].includes(invoice.orderStatus)) ? 'Fully Paid' : (invoice.orderStatus || paymentStatusLabel(effectivePaymentStatus(invoice))),
     accountApprovalStatus: payload.accountApprovalStatus || 'Pending Accounts',
     accountApprovalNote: payload.accountApprovalNote || '',
     storeManagerClarification: payload.storeManagerClarification || '',
@@ -802,7 +811,7 @@ const formatSentInvoice = (invoice) => {
     notes: payload.notes || '',
     storeKey: invoice.store,
     paymentMethodKey: payload.paymentMethod || '',
-    paymentStatusKey: invoice.paymentStatus,
+    paymentStatusKey: effectivePaymentStatus(invoice),
   };
 };
 
@@ -2395,7 +2404,7 @@ router.patch('/invoices/:invoiceNumber/account-approval', requireRole('accounts'
   // there first. Measured against the same threshold, read from the same
   // setting, that Production itself checks — so the two gates can't fall out
   // of sync the way they did for INV59655 (approved while still Unpaid).
-  if (status === 'Approved' && invoice.paymentStatus !== 'fully_paid') {
+  if (status === 'Approved' && effectivePaymentStatus(invoice) !== 'fully_paid') {
     const settings = await readSetting(SETTINGS_KEY, {});
     const releasePercent = Number(settings.paymentReleasePercent ?? DEFAULT_SETTINGS.paymentReleasePercent);
     const payable = Math.max(0, Number(invoice.total || 0));
@@ -2916,7 +2925,7 @@ const productionBlockReason = (invoice, orderSheet, releasePercent = 70) => {
   // Approval alone is not enough: enough of the money has to be in. Measured
   // against what was actually recorded as received, not against the label on
   // the invoice, so "part paid" with nothing behind it does not open the gate.
-  if (invoice.paymentStatus !== 'fully_paid') {
+  if (effectivePaymentStatus(invoice) !== 'fully_paid') {
     // invoice.total is already net of the elite discount and store credit —
     // subtracting them again here undercounted what was payable.
     const payable = Math.max(0, Number(invoice.total || 0));
@@ -3420,11 +3429,9 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
   // measure against, so older invoices with no figure are left as they were.
   let nextPaymentStatus = invoice.paymentStatus;
   const paidIsRecorded = payload.paid !== undefined && payload.paid !== null && payload.paid !== '';
-  if (nextTotal !== Number(invoice.total)) {
-    if (nextTotal <= 0) nextPaymentStatus = 'fully_paid';
-    else if (paidIsRecorded) {
-      nextPaymentStatus = alreadyPaid <= 0 ? 'unpaid' : alreadyPaid >= nextTotal ? 'fully_paid' : 'partial_paid';
-    }
+  if (nextTotal <= 0) nextPaymentStatus = 'fully_paid';
+  else if (nextTotal !== Number(invoice.total) && paidIsRecorded) {
+    nextPaymentStatus = alreadyPaid <= 0 ? 'unpaid' : alreadyPaid >= nextTotal ? 'fully_paid' : 'partial_paid';
   }
 
   await invoice.update({
@@ -3434,6 +3441,10 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
     ...(store ? { store: normalizeStoreKey(store) } : {}),
     total: nextTotal,
     ...(nextPaymentStatus !== invoice.paymentStatus ? { paymentStatus: nextPaymentStatus } : {}),
+    // The order status carries the payment label until production takes over,
+    // so it moves with the payment status instead of staying on "Unpaid".
+    ...(nextPaymentStatus !== invoice.paymentStatus && ['Unpaid', 'Partial Paid', 'Fully Paid'].includes(invoice.orderStatus)
+      ? { orderStatus: paymentStatusLabel(nextPaymentStatus) } : {}),
     payload: nextPayload,
   });
 
@@ -4153,6 +4164,12 @@ router.delete('/inventory-types/:name', requireRole('inventory_manager', 'owner'
   res.json({ success: true, data: { types: next, units: INVENTORY_UNITS } });
 }));
 
+// Item names are unique, and an archived item keeps its name. Said plainly,
+// rather than left to the database's generic "Resource already exists".
+const duplicateNameMessage = (clash) => (clash.archivedAt
+  ? `An archived item is already named "${clash.name}"${clash.sku ? ` (code ${clash.sku})` : ''}. Choose a different name.`
+  : `Another item is already named "${clash.name}"${clash.sku ? ` (code ${clash.sku})` : ''}. Choose a different name.`);
+
 router.post('/fabrics', requireRole('inventory_manager', 'owner', 'admin'), asyncHandler(async (req, res) => {
   const { sku, name, type, colour, quantity = 0, unit = 'units', cost, location, store, supplier, lowStockThreshold = 0, image } = req.body;
   const numericQuantity = Number(quantity);
@@ -4196,6 +4213,10 @@ router.post('/fabrics', requireRole('inventory_manager', 'owner', 'admin'), asyn
     if (clash) {
       return res.status(409).json({ success: false, message: `SKU ${trimmedSku} is already used by ${clash.name}` });
     }
+  }
+  const nameClash = await Fabric.findOne({ where: { name: String(name).trim() } });
+  if (nameClash) {
+    return res.status(409).json({ success: false, message: duplicateNameMessage(nameClash) });
   }
 
   const storeKey = String(store || '').trim().toLowerCase();
@@ -5217,6 +5238,12 @@ router.patch('/fabrics/:id', requireRole('inventory_manager', 'owner', 'admin'),
     const clash = await Fabric.findOne({ where: { sku: changes.sku } });
     if (clash && clash.id !== fabric.id) {
       return res.status(409).json({ success: false, message: `SKU ${changes.sku} is already used by ${clash.name}` });
+    }
+  }
+  if (changes.name && changes.name !== fabric.name) {
+    const nameClash = await Fabric.findOne({ where: { name: changes.name } });
+    if (nameClash && nameClash.id !== fabric.id) {
+      return res.status(409).json({ success: false, message: duplicateNameMessage(nameClash) });
     }
   }
 
