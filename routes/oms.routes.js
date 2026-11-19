@@ -590,6 +590,34 @@ const safeImageDataUrl = (value) => {
   return match && ALLOWED_IMAGE_TYPES.has(match[1].toLowerCase()) ? value.trim() : null;
 };
 
+// Pictures a Store Manager attaches when answering a flag. They are kept with
+// the clarification itself, not mixed into the customer's payment evidence, so
+// Accounts can tell which photos are the answer. At most a handful, and each
+// must be a real raster image.
+const MAX_CLARIFICATION_IMAGES = 5;
+const cleanClarificationImages = (raw) => (Array.isArray(raw) ? raw : [])
+  .filter((item) => item && safeImageDataUrl(item.dataUrl))
+  .slice(0, MAX_CLARIFICATION_IMAGES)
+  .map((item) => ({
+    name: String(item.name || 'Clarification image').slice(0, 200),
+    type: String(item.type || ''),
+    size: Number(item.size || 0),
+    dataUrl: safeImageDataUrl(item.dataUrl),
+    uploadedAt: new Date().toISOString(),
+  }));
+// What the lists carry: the facts about each picture, never the picture. The
+// image itself is fetched by whoever opens the invoice.
+const clarificationImageMeta = (images) => (Array.isArray(images) ? images : []).map((item) => ({
+  name: item?.name || 'Clarification image',
+  type: item?.type || '',
+  size: item?.size || 0,
+  uploadedAt: item?.uploadedAt || null,
+}));
+const paymentHistoryForList = (history) => (Array.isArray(history) ? history : []).map((entry) => {
+  if (!entry || !Array.isArray(entry.clarificationImages)) return entry;
+  return { ...entry, clarificationImages: clarificationImageMeta(entry.clarificationImages) };
+});
+
 const trackingTokenFromUrl = (value = '') => {
   const match = String(value).match(/\/c\/([^/?#]+)/);
   return match?.[1] || '';
@@ -759,6 +787,7 @@ const formatSentInvoice = (invoice) => {
     accountApprovalStatus: payload.accountApprovalStatus || 'Pending Accounts',
     accountApprovalNote: payload.accountApprovalNote || '',
     storeManagerClarification: payload.storeManagerClarification || '',
+    storeManagerClarificationImages: clarificationImageMeta(payload.storeManagerClarificationImages),
     clarifiedBy: payload.clarifiedBy || '',
     clarifiedAt: payload.clarifiedAt || null,
     // The timeline showed a hollow marker and a dash whatever the invoice's
@@ -805,7 +834,7 @@ const formatSentInvoice = (invoice) => {
     invoiceDiscountAmount: Number(payload.invoiceDiscountAmount || 0),
     balanceDue: Number(payload.balanceDue ?? invoice.total ?? 0),
     paid: payload.paid ?? payload.amountPaid ?? payload.amountReceived ?? payload.paymentAmount ?? null,
-    paymentHistory: Array.isArray(payload.paymentHistory) ? payload.paymentHistory : [],
+    paymentHistory: paymentHistoryForList(payload.paymentHistory),
     invoiceDate: payload.invoiceDate || invoice.createdAt,
     dueDate: payload.dueDate || '',
     notes: payload.notes || '',
@@ -2551,6 +2580,7 @@ router.patch('/invoices/:invoiceNumber/payments/:paymentId/clarify', requireRole
     ...entry,
     reviewStatus: 'Pending Accounts',
     clarification,
+    clarificationImages: cleanClarificationImages(req.body?.clarificationImages),
     clarifiedBy: req.staff.displayName,
     clarifiedAt: new Date().toISOString(),
   };
@@ -3414,6 +3444,8 @@ router.patch('/invoices/:invoiceNumber', requireRole('owner', 'admin', 'store_ma
     ...(isFlaggedClarification ? {
       accountApprovalStatus: 'Pending Accounts',
       storeManagerClarification: cleanClarification.slice(0, 2000),
+      // Replaced each time: the pictures belong to this answer, not the last.
+      storeManagerClarificationImages: cleanClarificationImages(req.body?.clarificationImages),
       clarifiedBy: req.staff.displayName,
       clarifiedAt: new Date().toISOString(),
     } : {}),
@@ -4279,6 +4311,39 @@ router.get('/fabrics/:id', onlyItemIds, asyncHandler(async (req, res) => {
 
   res.json({ success: true, data: { fabric, allocations } });
 }));
+
+// The pictures a Store Manager attached to a clarification — on the invoice
+// itself, or on one flagged payment. Behind the session, as payment evidence is.
+const sendStoredImage = (res, image, filename) => {
+  const match = IMAGE_DATA_URL.exec(image?.dataUrl || '');
+  const type = match?.[1].toLowerCase();
+  if (!type || !ALLOWED_IMAGE_TYPES.has(type)) {
+    return res.status(404).json({ success: false, message: 'No image attached' });
+  }
+  res.set('Content-Type', type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.set('Content-Disposition', `inline; filename="${filename}"`);
+  res.set('Cache-Control', 'private, max-age=300');
+  return res.send(Buffer.from(match[2].replace(/\s/g, ''), 'base64'));
+};
+
+router.get('/invoices/:invoiceNumber/clarification-images/:index', asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber }, attributes: ['payload'] });
+  const list = Array.isArray(invoice?.payload?.storeManagerClarificationImages) ? invoice.payload.storeManagerClarificationImages : [];
+  const index = Number(req.params.index);
+  return sendStoredImage(res, Number.isInteger(index) ? list[index] : null, `${req.params.invoiceNumber}-clarification-${index}`);
+}));
+
+router.get('/invoices/:invoiceNumber/payments/:paymentId/clarification-images/:index', asyncHandler(async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber }, attributes: ['payload'] });
+  const history = Array.isArray(invoice?.payload?.paymentHistory) ? invoice.payload.paymentHistory : [];
+  const entry = history.find((item) => item && item.id === req.params.paymentId);
+  const list = Array.isArray(entry?.clarificationImages) ? entry.clarificationImages : [];
+  const index = Number(req.params.index);
+  return sendStoredImage(res, Number.isInteger(index) ? list[index] : null, `${req.params.invoiceNumber}-payment-clarification-${index}`);
+}));
+
 
 // The photograph itself, asked for only when somebody opens the invoice. It
 // stays behind the session: this is a customer's bank transfer, not a product
