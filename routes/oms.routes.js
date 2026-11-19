@@ -4328,22 +4328,37 @@ const sendStoredImage = (res, image, filename) => {
   return res.send(Buffer.from(match[2].replace(/\s/g, ''), 'base64'));
 };
 
-router.get('/invoices/:invoiceNumber/clarification-images/:index', asyncHandler(async (req, res) => {
-  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber }, attributes: ['payload'] });
-  const list = Array.isArray(invoice?.payload?.storeManagerClarificationImages) ? invoice.payload.storeManagerClarificationImages : [];
+// Only the people who handle a clarification may open its pictures, and a
+// Store Manager only on their own store's invoices — the same rule the invoice
+// detail applies.
+const CLARIFICATION_IMAGE_ROLES = ['owner', 'admin', 'accounts', 'store_manager'];
+const loadInvoiceForClarificationImages = async (req, res) => {
+  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber }, attributes: ['payload', 'store'] });
+  const scopedToOwnStore = req.staff?.role === 'store_manager' && req.staff.store && req.staff.store !== 'all';
+  if (!invoice || (scopedToOwnStore && normalizeStoreKey(invoice.store) !== normalizeStoreKey(req.staff.store))) {
+    res.status(404).json({ success: false, message: 'No image attached' });
+    return null;
+  }
+  return invoice;
+};
+
+router.get('/invoices/:invoiceNumber/clarification-images/:index', requireRole(...CLARIFICATION_IMAGE_ROLES), asyncHandler(async (req, res) => {
+  const invoice = await loadInvoiceForClarificationImages(req, res);
+  if (!invoice) return undefined;
+  const list = Array.isArray(invoice.payload?.storeManagerClarificationImages) ? invoice.payload.storeManagerClarificationImages : [];
   const index = Number(req.params.index);
   return sendStoredImage(res, Number.isInteger(index) ? list[index] : null, `${req.params.invoiceNumber}-clarification-${index}`);
 }));
 
-router.get('/invoices/:invoiceNumber/payments/:paymentId/clarification-images/:index', asyncHandler(async (req, res) => {
-  const invoice = await SentInvoice.findOne({ where: { invoiceNumber: req.params.invoiceNumber }, attributes: ['payload'] });
-  const history = Array.isArray(invoice?.payload?.paymentHistory) ? invoice.payload.paymentHistory : [];
+router.get('/invoices/:invoiceNumber/payments/:paymentId/clarification-images/:index', requireRole(...CLARIFICATION_IMAGE_ROLES), asyncHandler(async (req, res) => {
+  const invoice = await loadInvoiceForClarificationImages(req, res);
+  if (!invoice) return undefined;
+  const history = Array.isArray(invoice.payload?.paymentHistory) ? invoice.payload.paymentHistory : [];
   const entry = history.find((item) => item && item.id === req.params.paymentId);
   const list = Array.isArray(entry?.clarificationImages) ? entry.clarificationImages : [];
   const index = Number(req.params.index);
   return sendStoredImage(res, Number.isInteger(index) ? list[index] : null, `${req.params.invoiceNumber}-payment-clarification-${index}`);
 }));
-
 
 // The photograph itself, asked for only when somebody opens the invoice. It
 // stays behind the session: this is a customer's bank transfer, not a product
